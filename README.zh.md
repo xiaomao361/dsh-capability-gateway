@@ -99,18 +99,6 @@ skillKeywords:
 
 搜索刻意保守：没有匹配时返回 `not_found` 并指向原生方式，而不是编一个结果；网关也不会自己调用下游工具。
 
-## 插件市场
-
-DSH 的插件市场是“自带索引”的模式：`dsh-plugin-market` 只读取用户配置的索引 URL，默认一个都不配。本仓库自带一份格式 1 的索引：`market/index.json`。
-
-启用 `@deepseek-ai/dsh-experimental-plugin-market-bundle` 后，在插件页面的“发现”里添加：
-
-```
-https://raw.githubusercontent.com/xiaomao361/dsh-capability-gateway/main/market/index.json
-```
-
-索引只钉住具体版本与来源；安装仍由 plugin manager 自己校验与批准。不启用市场也可以直接用插件管理器按包名或 Git 地址安装。
-
 ## 隐私
 
 每条事件记录：动作、目标名、路由、结果、错误码、耗时、候选名与排名、插件版本。不记录：查询原文、工具参数、返回值、错误正文、凭据、文件路径。

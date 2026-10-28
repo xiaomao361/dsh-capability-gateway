@@ -99,18 +99,6 @@ Missing or broken packs are skipped, never fatal. A skill can also declare its o
 
 Search is deliberately conservative. Unmatched queries return `not_found` with a pointer to the native path rather than a fake match, and the gateway never calls an upstream tool on its own.
 
-## Plugin market
-
-DSH's plugin market is bring-your-own-index: `dsh-plugin-market` only reads index URLs a user configures, and none are configured by default. This repository ships a format-1 index at [market/index.json](market/index.json).
-
-With `@deepseek-ai/dsh-experimental-plugin-market-bundle` enabled, add it under Plugins → Discover:
-
-```
-https://raw.githubusercontent.com/xiaomao361/dsh-capability-gateway/main/market/index.json
-```
-
-The index pins an exact version and its source; installing still goes through the plugin manager's own compatibility check and approval. The market is optional — installing by package name or Git URL works without it.
-
 ## Privacy
 
 Recorded per event: action, target name, route, outcome, error code, duration, candidate names and ranks, plugin version. Not recorded: query text, tool arguments, results, error bodies, credentials, file paths.
