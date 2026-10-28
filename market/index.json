@@ -1,0 +1,79 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Capability gateway",
+    "zh": "能力网关"
+  },
+  "description": {
+    "en": "One on-demand gateway for opted-in third-party skills and MCP tools.",
+    "zh": "把选定的第三方技能与 MCP 工具收进一个按需入口，能力再多也不会挤爆上下文。"
+  },
+  "metadata": {
+    "categories": {
+      "tools": {
+        "title": {
+          "en": "Tools",
+          "zh": "工具"
+        }
+      }
+    },
+    "labels": {
+      "mcp": {
+        "title": {
+          "en": "MCP",
+          "zh": "MCP"
+        }
+      },
+      "skills": {
+        "title": {
+          "en": "Skills",
+          "zh": "技能"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-capability-gateway",
+      "title": {
+        "en": "Capability gateway",
+        "zh": "能力网关"
+      },
+      "description": {
+        "en": "Hides opted-in skills and MCP tools behind one capability tool: search by intent, read the schema, then call. Keeps a bounded name index in the prompt and a local metadata journal.",
+        "zh": "把选定的技能和 MCP 工具从原生目录里收起来，只留一个 capability 工具：按意图搜索、看 schema、再调用。提示里保留有界名单，本地记录元数据。"
+      },
+      "icon": "../icon.svg",
+      "author": "Zhou Wei",
+      "homepage": "https://github.com/xiaomao361/dsh-capability-gateway",
+      "repository": {
+        "url": "https://github.com/xiaomao361/dsh-capability-gateway"
+      },
+      "metadata": {
+        "category": "tools",
+        "keywords": [
+          "mcp",
+          "skills",
+          "context",
+          "tool search",
+          "gateway",
+          "能力",
+          "技能",
+          "上下文"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.4.0",
+          "publishTimestamp": 1793174372,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.3"
+          }
+        }
+      ]
+    }
+  ]
+}

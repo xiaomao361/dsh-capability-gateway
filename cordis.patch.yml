@@ -1,0 +1,34 @@
+# Capability gateway: opt-in third-party skills and MCP servers behind one tool.
+#
+# This file is the PACKAGE default. It deliberately manages nothing: what to
+# wrap is install data, not package data. Add your own values in the profile
+# patch (~/.dsh/profiles/<name>/cordis.patch.yml) with an id-targeted override,
+# for example:
+#
+#   - id: capability-gateway
+#     config:
+#       skillRoots: ['~/.agents/skills']
+#       mcpServers: ['my-aggregator']
+#
+# A patch replaces the whole `config` object, so repeat every key you need.
+#
+# Keys:
+# - skillRoots: directories whose skills leave the native catalog and are served
+#   by the gateway. Only these roots are managed; DSH bundled skills, project
+#   skills, and ~/.dsh/skills keep their native surface.
+# - mcpServers: MCP server names whose mcp__<server>__* tools are hidden from
+#   agents and proxied through the gateway.
+# - mcpKeywords / skillKeywords: optional name -> keyword-array mappings. They
+#   only make existing capabilities findable (aliases), never expand the managed
+#   scope. Default empty: the gateway cannot know your vocabulary.
+# - logDir: optional metadata journal directory (default: $DSH_HOME/data/capability-gateway).
+#   Records do not contain query text, tool arguments, or result/error bodies.
+# - enabled: false turns the plugin inert without uninstalling it, restoring the
+#   original native exposure for every managed capability.
+- insert:
+    - id: capability-gateway
+      name: 'dsh-capability-gateway'
+      config:
+        enabled: true
+        skillRoots: []
+        mcpServers: []

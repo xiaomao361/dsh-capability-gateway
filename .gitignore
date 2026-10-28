@@ -1,0 +1,7 @@
+node_modules/
+*.tgz
+local/
+work/
+notes/
+.DS_Store
+*.log

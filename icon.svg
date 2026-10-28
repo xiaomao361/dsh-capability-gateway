@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Capability gateway">
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="#5B6CFF" stroke-width="3"/>
+  <path d="M16 20h32l-12 13v13l-8 5V33z" fill="none" stroke="#5B6CFF" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="48" cy="44" r="5" fill="#5B6CFF"/>
+</svg>
