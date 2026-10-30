@@ -4,7 +4,7 @@
  * Native reuse:
  * - MCP discovery and execution remain native. Native tool schemas are filtered
  *   at prompt assembly; dispatch retains the calling agent, token and guards.
- *   PTC SDK exposure is left unchanged (reported explicitly by status).
+ *   PTC SDK declarations use the host renderer with only unmanaged schemas.
  * - Per-agent skill providers hide opted-in skills while retaining the native
  *   project/runtime/personal precedence and explicit user invocation.
  *
@@ -31,15 +31,6 @@ const PROVIDER = 'capability-gateway'
 const PLUGIN_VERSION = (() => {
   try { return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version ?? null } catch { return null }
 })()
-// Optional local alias pack for skills that ship English-only descriptions.
-// Kept beside the plugin (not in `files`) so a published package never carries
-// one user's skill names; config.skillKeywords overrides it entry by entry.
-const LOCAL_SKILL_KEYWORDS = (() => {
-  try {
-    const value = JSON.parse(readFileSync(new URL('./local/skill-keywords.json', import.meta.url), 'utf8'))
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-  } catch { return {} }
-})()
 const TOOL_NAME = 'capability'
 const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MAX_DESCRIPTION = 500
@@ -55,11 +46,18 @@ export function apply(ctx, rawConfig) {
   }
 
   const validateArguments = createArgumentValidator()
+  // Presentation adapter only: never replace methods on the live registry or
+  // restrict execution to hide declarations. Older hosts retain their SDK and
+  // report native-sdk explicitly. Rendering errors still fail prompt assembly.
+  const ptcSdkSupported = ['sdkSection', 'sdkSchemas', 'modeFor', 'requirePtcRuntime'].every(key => typeof ctx.tools[key] === 'function')
+  const ptcSdkSection = ptcSdkSupported ? ctx.tools.sdkSection.call({
+    ctx: ctx.tools.ctx,
+    modeFor: scope => ctx.tools.modeFor(scope),
+    requirePtcRuntime: mode => ctx.tools.requirePtcRuntime(mode),
+    sdkSchemas: scope => ctx.tools.sdkSchemas(scope).filter(schema => !serverOf(schema.name)),
+  }) : null
   const controls = new Set()
   let skillCache = { at: 0, skills: [], error: undefined }
-  // Name snapshot for the prompt index. Kept apart from skillCache: priming the
-  // provider cache at startup would serve a stale empty list for the first scan.
-  let indexNames = []
 
   const journal = new EventJournal(config.logDir, { pluginVersion: PLUGIN_VERSION })
   const traces = new WeakMap()
@@ -203,11 +201,6 @@ export function apply(ctx, rawConfig) {
     return skills
   }
 
-  function refreshIndexNames() {
-    if (!config.promptIndex || !config.wrapSkills || !config.skillRoots.length) return
-    scanSkills().then(list => { indexNames = list.map(skill => skill.name) }).catch(() => {})
-  }
-
   async function managedSkills() {
     if (!config.wrapSkills || config.skillRoots.length === 0) return []
     if (Date.now() - skillCache.at < 2000) {
@@ -226,7 +219,6 @@ export function apply(ctx, rawConfig) {
 
   function invalidateSkills() {
     skillCache = { at: 0, skills: skillCache.skills, error: skillCache.error }
-    refreshIndexNames()
     for (const control of controls) {
       try {
         control.invalidate()
@@ -255,9 +247,22 @@ export function apply(ctx, rawConfig) {
   // globally: that loses the caller's scoped policies and model/account context.
   ctx.on('system-prompt/assemble', async (assembly, context, next) => {
     const result = await next()
-    if (!config.wrapMcp) return result
     const names = new Set(wrappedSchemas({ agent: context.scope }).map((tool) => tool.name))
-    return { ...result, tools: result.tools.filter((tool) => !names.has(tool.name)) }
+    let index = []
+    let indexError = null
+    if (config.promptIndex) {
+      try { index = (await visibleSkills({ agent: context.scope })).map(skill => skill.name) }
+      catch (error) { indexError = errorCode(error) }
+      index.push(...names)
+    }
+    return { ...result,
+      tools: result.tools.filter((tool) => !names.has(tool.name)),
+      sections: result.sections.map(section => {
+        if (section.name === 'capability-gateway') return { ...section, text: promptText(index, indexError) }
+        if (section.name === 'tools:sdk' && ctx.tools.modeFor(context.scope) !== 'native' && names.size && ptcSdkSection) return { ...section, text: ptcSdkSection.text(context) }
+        return section
+      }),
+    }
   })
 
   // The provider registers on each agent's scoped context: a preset-layer
@@ -345,9 +350,20 @@ export function apply(ctx, rawConfig) {
 
   // ── gateway tool ───────────────────────────────────────────────────────────
 
+  async function discoverCapabilities(exec, kind) {
+    const requested = kind ? [kind] : ['skill', 'mcp']
+    const results = await Promise.allSettled(requested.map(group => Promise.resolve().then(() => group === 'skill' ? visibleSkills(exec) : wrappedSchemas(exec))))
+    const discovery = { skills: [], mcp: [], unavailable: [] }
+    results.forEach((result, index) => {
+      const group = requested[index]
+      if (result.status === 'fulfilled') discovery[group === 'skill' ? 'skills' : 'mcp'] = result.value
+      else discovery.unavailable.push({ kind: group, code: errorCode(result.reason) })
+    })
+    return discovery
+  }
+
   async function search(query, limit, exec, kind) {
-    const skills = kind === 'mcp' ? [] : await visibleSkills(exec)
-    const mcp = kind === 'skill' ? [] : wrappedSchemas(exec)
+    const { skills, mcp, unavailable } = await discoverCapabilities(exec, kind)
     const candidates = [
       ...skills.map(skill => ({ kind: 'skill', name: skill.name, detail: skill.description, whenToUse: skill.whenToUse,
         keywords: [...skill.keywords ?? [], ...config.skillKeywords.get(skill.name) ?? []] })),
@@ -367,11 +383,13 @@ export function apply(ctx, rawConfig) {
     const top = (fallback ? entries : scored).slice(0, limit)
     const routingTarget = top.find(item => item.kind === 'mcp' && (fallback || item.keywordMatch))
     const trace = traceOf(exec)
-    if (trace) Object.assign(trace, { candidates: top.map(({ kind, name }) => ({ kind, name })), matchCount: listing ? null : scored.length })
+    if (trace) Object.assign(trace, { candidates: top.map(({ kind, name }) => ({ kind, name })), matchCount: listing ? null : scored.length, discoveryIncomplete: unavailable.length > 0 })
     if (!top.length) {
+      if (unavailable.length) throw new Error(`${unavailable[0].code}: 能力发现不完整（${unavailable.map(x => `${x.kind}: ${x.code}`).join('; ')}）；当前可用范围没有候选，不能判定为未命中。用 action=inventory 查看异常。`)
       throw new Error('not_found: 网关范围内无匹配；这里只搜索已接管的第三方能力，不代表 DSH 没有此能力。原生、项目或未纳入能力请按原方式使用。可缩小为能力名称或短关键词，或用 kind=skill|mcp 收窄；长任务描述不推荐通用 MCP 入口。查看完整接入清单请到设置 → 内置插件 → 能力网关。')
     }
-    return [
+    const text = [
+      ...(unavailable.length ? [`发现不完整（${unavailable.map(x => `${x.kind}: ${x.code}`).join('; ')}）。以下仅为当前可用部分；缺失类别的能力未知。`] : []),
       listing ? `未提供查询词，按名称列出 ${top.length} 项（共 ${candidates.length} 项已接管能力）。`
         : fallback ? '无直接匹配。以下 MCP 入口可继续检索与路由，不代表已找到目标能力或确认下游可用。'
           : `网关范围内匹配 ${scored.length} 项，返回 ${top.length} 项。只含已接管能力；原生/未纳入能力按原方式使用。`,
@@ -381,6 +399,7 @@ export function apply(ctx, rawConfig) {
         ? `下一步：先 action=describe, name="${routingTarget.name}" 查看参数，再按 schema 用 action=call 将原查询交给该入口继续检索；不自动调用。`
         : '技能：action=load；MCP：action=describe → call。可用 kind=skill|mcp 收窄。',
     ].join('\n')
+    return { content: [{ type: 'text', text }], discovery: { complete: unavailable.length === 0, unavailable } }
   }
 
   async function describeTool(name, exec) {
@@ -519,6 +538,7 @@ export function apply(ctx, rawConfig) {
     return {
       at: Date.now(), agentId: identity(exec), scope: exec.agent ? 'live-agent' : 'host-only', mode,
       nativeSkillsComplete: native.complete,
+      configDiagnostics: config.diagnostics,
       mcpConfigurationObserved: loaders.size > 0,
       skillRoots: roots.map(({ skills, ...root }) => root),
       skills: skills.sort((a, b) => a.name.localeCompare(b.name)),
@@ -528,12 +548,16 @@ export function apply(ctx, rawConfig) {
           : registrations(name).some(x => x.phase === 'failed') ? 'plugin_failed' : 'no_tools_observed',
         registrations: registrations(name),
         tools, toolCount: tools.length,
-        presentation: !config.wrapMcp || !config.mcpServers.includes(name) ? 'native' : mode === 'native' ? 'gateway' : 'native-sdk',
+        presentation: !config.wrapMcp || !config.mcpServers.includes(name) ? 'native' : mode === 'native' ? 'gateway' : ptcSdkSupported ? 'gateway-sdk' : 'native-sdk',
       })),
     }
   }
 
   const liveAgents = () => ctx.get('agents')?.list() ?? []
+  const agentTitle = agent => {
+    try { return bound(ctx.get('sessionTitle')?.get(agent.session)?.title, 80) ?? null }
+    catch { return null } // Optional display metadata; identity never depends on it.
+  }
   registerRemote(ctx, {
     async snapshot(raw = {}) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid_arguments: snapshot options must be an object')
@@ -556,7 +580,7 @@ export function apply(ctx, rawConfig) {
           action: ['search', 'load', 'describe', 'call'].includes(options.action) ? options.action : undefined }),
       ])
       return { inventory: catalog, activity,
-        agents: agents.map(x => ({ id: identity({ agent: x }) })).filter(x => x.id),
+        agents: agents.map(x => ({ id: identity({ agent: x }), title: agentTitle(x) })).filter(x => x.id),
         config: { wrapSkills: config.wrapSkills, wrapMcp: config.wrapMcp },
       }
     },
@@ -565,33 +589,41 @@ export function apply(ctx, rawConfig) {
       return journal.review(options.eventId, options.verdict)
     },
     async report(options = {}) {
+      if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('invalid_arguments: report options must be an object')
       const format = options?.format ?? 'markdown'
       if (!['markdown', 'json'].includes(format)) throw new Error('invalid_arguments: format must be markdown or json')
-      const summary = await journal.summary()
+      const scope = options.historyScope ?? 'all'
+      if (!['all', 'selected'].includes(scope)) throw new Error('invalid_arguments: invalid report scope')
+      if (scope === 'all' && options.agentId !== undefined) throw new Error('invalid_arguments: agentId requires selected report scope')
+      if (scope === 'selected' && (typeof options.agentId !== 'string' || !options.agentId)) throw new Error('invalid_arguments: selected report scope requires agentId')
+      if (scope === 'selected' && !liveAgents().some(agent => identity({ agent }) === options.agentId)) throw new Error('not_found: selected report agent no longer exists; refresh the session list')
+      const summary = await journal.summary({ agentId: scope === 'selected' ? options.agentId : undefined })
       const report = buildReport(summary)
       return { format, filename: reportFilename(summary, format), generatedAt: summary.generatedAt,
-        pluginVersion: summary.pluginVersion, content: format === 'json' ? report.json : report.markdown }
+        pluginVersion: summary.pluginVersion, scope: summary.scope, content: format === 'json' ? report.json : report.markdown }
     },
   })
 
   async function status(exec) {
-    const skills = await visibleSkills(exec)
-    const mcp = wrappedSchemas(exec)
+    const { skills, mcp, unavailable } = await discoverCapabilities(exec)
+    const mcpUnknown = unavailable.some(x => x.kind === 'mcp')
     const perServer = config.mcpServers.map((server) => {
       const count = mcp.filter((schema) => serverOf(schema.name) === server).length
-      return `${server}: ${count === 0 ? 'unavailable (no tools registered)' : `${count} tools`}`
+      return `${server}: ${mcpUnknown ? 'unknown (discovery failed)' : count === 0 ? 'unavailable (no tools registered)' : `${count} tools`}`
     })
     const mode = ctx.tools.modeFor(exec?.agent)
     return [
       'Capability gateway: enabled',
+      `discovery: ${unavailable.length ? `incomplete (${unavailable.map(x => `${x.kind}: ${x.code}`).join('; ')})` : 'complete'}`,
       'View inventory and routing activity in 设置 → 内置插件 → 能力网关.',
-      `skills: ${skills.length} managed from ${config.skillRoots.join(', ') || '(none)'} — model catalog hidden, user invocation kept`,
+      `skills: ${unavailable.some(x => x.kind === 'skill') ? 'unknown (discovery failed)' : `${skills.length} managed`} from ${config.skillRoots.join(', ') || '(none)'} — model catalog hidden, user invocation kept`,
       `mcp: ${config.mcpServers.length} wrapped server(s) — ${perServer.join('; ') || '(none)'}`,
-      `MCP presentation: ${mode === 'native' ? `${mcp.length} tools omitted from native schemas` : 'PTC SDK retains native tool exposure; gateway calls remain scoped'}`,
+      `MCP presentation: ${mcpUnknown ? 'unknown (discovery failed)' : !config.wrapMcp ? 'native exposure (MCP wrapping disabled)' : mode === 'native' ? `${mcp.length} tools omitted from native schemas` : ptcSdkSupported ? `${mcp.length} tools omitted from PTC SDK declarations; use tools.capability inside run_code` : 'PTC SDK retains native tool exposure (host presentation API unsupported); gateway calls remain scoped'}`,
       `gateway tool: ${TOOL_NAME} (search / describe / load / call / status / inventory / history / stats / report)`,
       `report: ${PLUGIN_VERSION ? `version ${PLUGIN_VERSION} tags each event` : 'version unknown (package manifest unreadable); report rows stay unattributed'}`,
       `skill aliases: ${config.skillKeywords.size} skill(s) carry searchable synonyms`,
-      skillCache.error ? `last skill scan error: ${message(skillCache.error)}` : 'last skill scan: ok',
+      `configuration: ${config.diagnostics.complete ? 'complete' : `${config.diagnostics.total} alias warning(s); inspect inventory configDiagnostics and reload after correction`}`,
+      skillCache.error ? `last skill scan error: ${errorCode(skillCache.error)}` : 'last skill scan: ok',
     ].join('\n')
   }
 
@@ -694,7 +726,7 @@ export function apply(ctx, rawConfig) {
               { const { stats, storage } = await journal.snapshot({ agentId: identity(exec) }); value = JSON.stringify({ stats, storage }, null, 2) }
               break
             case 'report':
-              value = buildReport(await journal.summary()).markdown
+              value = buildReport(await journal.summary({ agentId: identity(exec) ?? undefined })).markdown
               break
             case 'status':
               value = await status(exec)
@@ -716,20 +748,13 @@ export function apply(ctx, rawConfig) {
   // out of the prompt, but publish the bounded name index so "I know something
   // exists" does not depend on a lexical guess; details still come from
   // search/describe/load.
-  const managedIndexNames = (scope) => {
-    const names = skillCache.skills.length ? skillCache.skills.map(skill => skill.name) : indexNames
-    if (config.wrapMcp && config.mcpServers.length) {
-      const prefixes = config.mcpServers.map(server => `mcp__${server}__`)
-      for (const schema of ctx.tools.schemas(scope)) {
-        if (prefixes.some(prefix => schema.name.startsWith(prefix))) names.push(schema.name)
-      }
-    }
-    return names
-  }
-  const promptText = (scope) => {
-    const hint = 'Some third-party capabilities are gated behind the `capability` tool and are absent from the tool catalog. Search it before concluding that an external skill or MCP tool is unavailable.'
+  const promptText = (names = [], indexError = null) => {
+    const messages = []
+    if (config.promptHint) messages.push('Some third-party capabilities are gated behind the `capability` tool and are absent from the tool catalog. Search it before concluding that an external skill or MCP tool is unavailable.')
+    if (indexError) messages.push(`Skill name index incomplete (${indexError}); skill availability is unknown. MCP names below remain scoped. Check capability inventory before relying on the skill index.`)
+    if (!config.diagnostics.complete) messages.push(`Alias configuration has ${config.diagnostics.total} warning(s); search coverage is incomplete. Inspect capability inventory configDiagnostics.`)
+    const hint = messages.join('\n')
     if (!config.promptIndex) return hint
-    const names = managedIndexNames(scope)
     if (!names.length) return hint
     const shown = []
     let length = 0
@@ -746,11 +771,9 @@ export function apply(ctx, rawConfig) {
       ctx.systemPrompt.section({
         name: 'capability-gateway',
         order: 860,
-        text: context => promptText(context?.scope),
+        text: () => promptText(),
       }),
     )
-    // Prime the index without touching the provider cache.
-    refreshIndexNames()
   }
 }
 
@@ -759,7 +782,8 @@ export function apply(ctx, rawConfig) {
 function compactInventory(catalog, kind, limit) {
   const complete = (kind === 'mcp' || (catalog.nativeSkillsComplete && catalog.skillRoots.every(x => x.state !== 'error')))
     && (kind === 'skill' || catalog.mcpConfigurationObserved)
-  const result = { scope: catalog.scope, kind: kind ?? 'all', complete, counts: {} }
+    && (kind === 'mcp' || catalog.configDiagnostics.complete)
+  const result = { scope: catalog.scope, kind: kind ?? 'all', complete, counts: {}, configDiagnostics: catalog.configDiagnostics }
   const anomalies = []
   const states = rows => rows.reduce((counts, row) => { counts[row.state] = (counts[row.state] ?? 0) + 1; return counts }, {})
   if (kind !== 'mcp') {
@@ -787,7 +811,13 @@ function compactInventory(catalog, kind, limit) {
 }
 
 function normalizeConfig(raw) {
+  if (raw !== undefined && (!raw || typeof raw !== 'object' || Array.isArray(raw))) throw new Error('invalid_config: configuration must be an object')
   const config = raw && typeof raw === 'object' ? raw : {}
+  for (const key of ['skillRoots', 'mcpServers']) {
+    if (config[key] !== undefined && (!Array.isArray(config[key]) || config[key].some(value => typeof value !== 'string' || !value.trim() || (key === 'mcpServers' && !/^[A-Za-z0-9_-]{1,32}$/.test(value.trim()))))) {
+      throw new Error(`invalid_config: ${key} must be an array of nonempty ${key === 'mcpServers' ? 'server names (letters, digits, _ or -, at most 32 characters)' : 'directory paths'}`)
+    }
+  }
   const skillRoots = Array.isArray(config.skillRoots)
     ? config.skillRoots.map((root) => expandHome(String(root))).filter(Boolean)
     : []
@@ -803,17 +833,19 @@ function normalizeConfig(raw) {
   if (config.keywordPacks !== undefined && (!Array.isArray(config.keywordPacks) || config.keywordPacks.some(pack => typeof pack !== 'string' || !pack.trim()))) {
     throw new Error('invalid_config: keywordPacks 必须是文件路径数组')
   }
-  const packKeywords = readKeywordPacks(keywordPacks)
-  const localSkillKeywords = config.localAliases === false ? {} : LOCAL_SKILL_KEYWORDS
+  const diagnostics = []
+  const packKeywords = readKeywordPacks(keywordPacks, diagnostics)
+  const localSkillKeywords = config.localAliases === false ? {} : readKeywordPacks([new URL('./local/skill-keywords.json', import.meta.url)], diagnostics, 'localAliases')
+  const inlineKeywords = keywordMap(config.skillKeywords, 'skillKeywords', { pattern: /^[A-Za-z0-9_.-]{1,80}$/, label: '技能名' })
   // Aliases are additive: a later source adds synonyms instead of replacing the
   // ones an earlier pack supplied for the same skill.
   const mergedSkillKeywords = new Map()
-  for (const source of [localSkillKeywords, packKeywords, config.skillKeywords ?? {}]) {
+  for (const source of [localSkillKeywords, packKeywords, Object.fromEntries(inlineKeywords)]) {
     for (const [name, words] of Object.entries(source)) {
-      mergedSkillKeywords.set(name, [...new Set([...(mergedSkillKeywords.get(name) ?? []), ...normalizeKeywordList(words)])])
+      mergedSkillKeywords.set(name, [...new Set([...(mergedSkillKeywords.get(name) ?? []), ...words])])
     }
   }
-  const skillKeywords = keywordMap(Object.fromEntries(mergedSkillKeywords), 'skillKeywords', { pattern: /^[A-Za-z0-9_.-]{1,80}$/, label: '技能名' })
+  const skillKeywords = mergedSkillKeywords
   if (config.enabled !== false && config.wrapSkills !== false
       && skillRoots.some((root) => root === expandHome('~/.dsh/skills'))) {
     throw new Error('invalid_config: ~/.dsh/skills is reserved for personal skills')
@@ -831,26 +863,36 @@ function normalizeConfig(raw) {
     promptIndex: config.promptIndex !== false,
     promptIndexChars: clampNumber(config.promptIndexChars, 200, 6000, 2000),
     keywordPacks,
+    diagnostics: { complete: diagnostics.length === 0, total: diagnostics.length, shown: Math.min(10, diagnostics.length), truncated: diagnostics.length > 10, items: diagnostics.slice(0, 10) },
     logDir: config.logDir ? expandHome(String(config.logDir)) : join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'data', 'capability-gateway'),
   }
 }
 
 // Shared alias packs are plain JSON files (name -> keyword array). A missing or
 // unreadable pack is skipped: aliases are optional data, never a startup error.
-function readKeywordPacks(paths) {
-  const merged = {}
-  for (const path of paths) {
+function readKeywordPacks(paths, diagnostics, source = 'keywordPacks') {
+  const merged = Object.create(null)
+  for (const [index, path] of paths.entries()) {
+    const warn = code => diagnostics.push({ source, index: index + 1, code })
+    let raw
     try {
-      const value = JSON.parse(readFileSync(path, 'utf8'))
-      if (!value || typeof value !== 'object' || Array.isArray(value)) continue
-      for (const [name, words] of Object.entries(value)) {
-        const list = normalizeKeywordList(words)
-        if (!/^[A-Za-z0-9_.-]{1,80}$/.test(name) || !list.length) continue
-        merged[name] = [...new Set([...(merged[name] ?? []), ...list])]
-      }
-    } catch {
-      // missing file, invalid JSON or unreadable path: no aliases from this pack
+      raw = readFileSync(path, 'utf8')
+    } catch (error) {
+      if (source !== 'localAliases' || error.code !== 'ENOENT') warn(error.code === 'ENOENT' ? 'file_missing' : 'file_unreadable')
+      continue
     }
+    let value
+    try { value = JSON.parse(raw) } catch { warn('invalid_json'); continue }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) { warn('invalid_pack'); continue }
+    let invalidEntries = 0
+    const entries = []
+    for (const [entryIndex, [name, words]] of Object.entries(value).entries()) {
+      try {
+        const valid = keywordMap({ [name]: words }, source, { pattern: /^[A-Za-z0-9_.-]{1,80}$/, label: '技能名' }).get(name)
+        merged[name] = [...new Set([...(merged[name] ?? []), ...valid])]
+      } catch { invalidEntries++; if (entries.length < 10) entries.push(entryIndex + 1) }
+    }
+    if (invalidEntries) { warn('invalid_entries'); Object.assign(diagnostics.at(-1), { count: invalidEntries, entries }) }
   }
   return merged
 }
@@ -859,10 +901,10 @@ function keywordMap(value, label, { pattern, label: nameLabel }) {
   const map = new Map()
   if (value === undefined) return map
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid_config: ${label} 必须是${nameLabel}到关键词数组的映射`)
-  for (const [name, keywords] of Object.entries(value)) {
+  for (const [index, [name, keywords]] of Object.entries(value).entries()) {
     if (!pattern.test(name) || !Array.isArray(keywords) || keywords.length > 50
       || keywords.some(word => typeof word !== 'string' || !word.trim() || Array.from(word.trim()).length > 80)) {
-      throw new Error(`invalid_config: ${label} 的${nameLabel}无效，或关键词不是非空字符串数组（每项最多 80 字、每${nameLabel}最多 50 项）`)
+      throw new Error(`invalid_config: ${label} 第 ${index + 1} 项的${nameLabel}无效，或关键词不是非空字符串数组（每项最多 80 字、每${nameLabel}最多 50 项）`)
     }
     map.set(name, [...new Set(keywords.map(word => word.trim()))])
   }

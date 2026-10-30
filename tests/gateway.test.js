@@ -225,19 +225,132 @@ test('invalid arguments and upstream failures remain errors', async t => {
 })
 
 
-test('PTC mode reports retained SDK exposure and scoped nested proxy still works', async t => {
+test('PTC SDK hides managed declarations while keeping scoped execution and native tools', async t => {
   const f = await setup(t)
   f.registerTool()
+  f.registerTool('mcp__other__echo')
   await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
   f.agent.ctx.tools.presentAs('ptc')
   const prompt = await f.ctx.systemPrompt.assemble({ scope: f.agent })
-  assert.ok(prompt.sections.find(x => x.name === 'tools:sdk').text.includes('mcp__bosun__echo'))
+  const sdk = prompt.sections.find(x => x.name === 'tools:sdk').text
+  assert.ok(!sdk.includes('mcp__bosun__echo'))
+  assert.ok(sdk.includes('mcp__other__echo'))
+  assert.ok(sdk.includes('capability'))
+  assert.ok(sdk.length < f.ctx.tools.sdkSection().text({ scope: f.agent }).length, 'managed declarations must reduce the SDK prompt')
+  assert.deepEqual(prompt.tools.map(x => x.name), ['run_code'])
+  assert.ok(f.ctx.tools.sdkSchemas(f.agent).some(x => x.name === 'mcp__bosun__echo'), 'execution registry stays intact')
   const status = await f.invoke({ action: 'status' }, { parent: {} })
   assert.ok(!status.isError, text(status))
-  assert.match(text(status), /PTC SDK retains native tool exposure/)
+  assert.match(text(status), /1 tools omitted from PTC SDK declarations/)
   const result = await f.invoke({ action: 'call', name: 'mcp__bosun__echo' }, { parent: {} })
   assert.ok(!result.isError, text(result))
   assert.equal(f.calls(), 1)
+  f.agent.ctx.tools.restrict({ deny: ['mcp__bosun__echo'] })
+  assert.ok((await f.invoke({ action: 'call', name: 'mcp__bosun__echo' }, { parent: {} })).isError)
+  assert.equal(f.calls(), 1)
+})
+
+test('native run_code dispatches capability through the scheduler and preserves guards', async t => {
+  const f = await setup(t)
+  f.registerTool()
+  f.agent.session.append = () => {}
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+  await f.ctx.plugin({ apply(ctx) {
+    ctx.provide('workingDirectory', { ensure: () => f.root })
+    ctx.provide('ptcRuntime', {
+      language: 'typescript', programFormat: 'function-body', release() {}, resolve: input => input,
+      async run(input) {
+        try { return { logs: [], value: await new AsyncFunction('tools', input.program)(input.bindings[0].functions) } }
+        catch (error) { return { logs: [], error: { kind: 'fixture', message: error.message } } }
+      },
+    })
+  } }).await()
+  f.agent.ctx.tools.presentAs('ptc')
+  const run = () => f.ctx.tools.execute({ callId: 'ptc-root', name: 'run_code',
+    arguments: { code: 'return await tools.capability({ action: "call", name: "mcp__bosun__echo", arguments: { value: "ptc-ok" } })', description: 'Isolated gateway call' },
+    signal: new AbortController().signal, agent: f.agent })
+  const success = await run()
+  assert.ok(!success.isError, text(success))
+  assert.match(text(success), /ptc-ok/)
+  assert.equal(f.calls(), 1)
+  f.agent.ctx.tools.guard(exec => exec.name === 'mcp__bosun__echo' ? 'PTC fixture denied' : undefined)
+  const denied = await run()
+  assert.ok(denied.isError)
+  assert.match(text(denied), /PTC fixture denied/)
+  assert.equal(f.calls(), 1)
+})
+
+test('PTC rendering stays scoped, updates with tools, and unload restores declarations', async t => {
+  const f = await setup(t, { wrapSkills: false })
+  const remove = f.registerTool()
+  await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
+  f.agent.ctx.tools.presentAs('ptc')
+  const sdk = async () => (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'tools:sdk').text
+  const first = await sdk()
+  const second = await sdk()
+  assert.equal(first, second)
+  const hint = async () => (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'capability-gateway').text
+  assert.equal((await hint()).split('mcp__bosun__echo').length - 1, 1, 'repeated assembly must not accumulate names')
+  const snapshot = await f.ctx.capabilityGateway.snapshot({ agentId: 'fixture-agent' })
+  assert.equal(snapshot.inventory.mcp.find(x => x.name === 'bosun').presentation, 'gateway-sdk')
+  const native = await f.ctx.systemPrompt.assemble()
+  assert.ok(!native.tools.some(x => x.name === 'mcp__bosun__echo'))
+  assert.ok(!native.sections.some(x => x.name === 'tools:sdk'))
+  remove()
+  assert.ok(!(await hint()).includes('mcp__bosun__echo'), 'removed tools must not linger in the name index')
+  assert.ok(!f.ctx.tools.sdkSchemas(f.agent).some(x => x.name === 'mcp__bosun__echo'))
+  f.registerTool('mcp__bosun__new')
+  assert.ok(!(await sdk()).includes('mcp__bosun__new'))
+  await f.fiber.dispose()
+  assert.ok((await sdk()).includes('mcp__bosun__new'))
+})
+
+test('Python PTC SDK uses the host renderer and omits only managed tools', async t => {
+  const f = await setup(t)
+  f.registerTool()
+  f.registerTool('mcp__other__echo')
+  await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'python', programFormat: 'program' }) } }).await()
+  f.agent.ctx.tools.presentAs('ptc')
+  const prompt = await f.ctx.systemPrompt.assemble({ scope: f.agent })
+  const sdk = prompt.sections.find(x => x.name === 'tools:sdk').text
+  assert.ok(!sdk.includes('mcp__bosun__echo'))
+  assert.ok(sdk.includes('mcp__other__echo'))
+  assert.ok(sdk.includes('capability'))
+})
+
+test('PTC renderer failures stay explicit instead of yielding an empty successful SDK', async t => {
+  const f = await setup(t)
+  f.registerTool()
+  await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'unsupported-fixture', programFormat: 'program' }) } }).await()
+  f.agent.ctx.tools.presentAs('ptc')
+  await assert.rejects(f.ctx.systemPrompt.assemble({ scope: f.agent }), /no SDK renderer registered/)
+})
+
+test('disabled and unwrapped PTC gateways leave the host SDK unchanged', async t => {
+  for (const config of [{ enabled: false }, { wrapMcp: false }]) {
+    const f = await setup(t, config)
+    f.registerTool()
+    await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
+    f.agent.ctx.tools.presentAs('ptc')
+    const sdk = (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'tools:sdk').text
+    assert.ok(sdk.includes('mcp__bosun__echo'))
+  }
+})
+
+test('unsupported host PTC presentation API retains the SDK with an explicit status', async t => {
+  const f = await setup(t)
+  f.registerTool()
+  await f.fiber.dispose()
+  // An older host can still provide PTC while lacking the SDK section factory.
+  const section = f.ctx.tools.sdkSection()
+  f.ctx.tools.sdkSection = undefined
+  await f.ctx.plugin(gateway, { wrapSkills: false, mcpServers: ['bosun'], logDir: join(f.root, 'unsupported') }).await()
+  await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
+  f.ctx.systemPrompt.section(section)
+  f.ctx.tools.defaultMode = 'ptc'
+  const sdk = (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'tools:sdk').text
+  assert.ok(sdk.includes('mcp__bosun__echo'))
+  assert.match(text(await f.invoke({ action: 'status' }, { parent: {} })), /host presentation API unsupported/)
 })
 
 test('YAML invocation comments, quoted values and invalid policies follow native semantics', async t => {
@@ -640,7 +753,10 @@ test('routing fallback is limited to short keyword queries and never diverts unm
 test('fallback does not mask discovery failures or imply an unregistered MCP is available; load errors use Chinese', async t => {
   const f = await setup(t, { skillRoots: ['/nonexistent/dsh-gateway-fallback-root'] })
   f.registerTool('mcp__bosun__search_tools')
-  assert.match(text(await f.invoke({ action: 'search', query: 'grafana' })), /dependency_missing:/)
+  const partial = await f.invoke({ action: 'search', query: 'grafana' })
+  assert.ok(!partial.isError, text(partial))
+  assert.match(text(partial), /发现不完整.*dependency_missing/)
+  assert.equal(partial.value.discovery.complete, false)
   assert.ok(!(await f.invoke({ action: 'search', query: 'grafana', kind: 'mcp' })).isError)
   const empty = await setup(t, { wrapMcp: false })
   empty.registerTool('mcp__bosun__search_tools')
@@ -800,4 +916,160 @@ test('shared keyword packs are merged and inline config wins', async t => {
   for (const [query, word] of [['固件', '固件'], ['打包', '打包'], ['专属', '专属']]) {
     assert.match(text(await f.invoke({ action: 'search', query })), /firmware-pack/, `${word} should reach the skill`)
   }
+})
+
+test('cold prompt index follows scoped winners and never shares another agent skill names', async t => {
+  const f = await setup(t)
+  await skill(f.skillRoot, 'firmware-pack', 'Build firmware')
+  await skill(f.skillRoot, 'manual-only', 'Manual skill', 'disable-model-invocation: true\n')
+  const hint = async agent => (await f.ctx.systemPrompt.assemble({ scope: agent })).sections.find(x => x.name === 'capability-gateway').text
+  assert.match(await hint(f.agent), /firmware-pack/)
+  assert.ok(!(await hint(f.agent)).includes('manual-only'))
+  const release = f.agent.ctx.skills.register({ name: 'firmware-pack', source: 'project-dsh', description: 'Project winner', content: 'Project content' })
+  assert.ok(!(await hint(f.agent)).includes('firmware-pack'))
+  assert.ok((await f.invoke({ action: 'load', name: 'firmware-pack' })).isError)
+  release()
+  assert.match(await hint(f.agent), /firmware-pack/)
+  assert.ok(!(await f.invoke({ action: 'load', name: 'firmware-pack' })).isError)
+  const other = { session: { id: 'unmanaged-agent' } }
+  other.ctx = createScope(f.ctx, other).ctx
+  const [managed, unmanaged, host] = await Promise.all([hint(f.agent), hint(other), hint(undefined)])
+  assert.match(managed, /firmware-pack/)
+  assert.ok(!unmanaged.includes('firmware-pack'))
+  assert.ok(!host.includes('firmware-pack'))
+})
+
+test('failed skill index is explicitly incomplete while scoped MCP index remains usable', async t => {
+  const f = await setup(t, { skillRoots: ['/nonexistent/gateway-index-fixture'] })
+  f.registerTool()
+  const hint = (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'capability-gateway').text
+  assert.match(hint, /Skill name index incomplete \(dependency_missing\)/)
+  assert.match(hint, /mcp__bosun__echo/)
+  assert.ok(!hint.includes('/nonexistent/'))
+  assert.ok(!(await f.invoke({ action: 'call', name: 'mcp__bosun__echo' })).isError)
+})
+
+test('explicit scope and skill alias configuration is validated before normalization', () => {
+  for (const value of [null, [], { workflow: 'alias' }, { workflow: [42] }, { workflow: [''] }, { workflow: ['x'.repeat(81)] }, { workflow: Array(51).fill('word') }]) {
+    assert.throws(() => gateway.apply({}, { enabled: false, skillKeywords: value }), /invalid_config: skillKeywords/)
+  }
+  for (const config of [{ skillRoots: 'path' }, { skillRoots: [42] }, { skillRoots: [''] }, { mcpServers: 'server' }, { mcpServers: ['invalid name'] }]) {
+    assert.throws(() => gateway.apply({}, { enabled: false, ...config }), /invalid_config:/)
+  }
+})
+
+test('alias diagnostics preserve valid entries and expose only bounded metadata', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gateway-alias-diagnostics-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const broken = join(root, 'private-broken.json')
+  const mixed = join(root, 'mixed.json')
+  await writeFile(broken, 'private-invalid-json-secret')
+  await writeFile(mixed, JSON.stringify({ 'firmware-pack': ['固件'], invalid: [42] }))
+  const f = await setup(t, { keywordPacks: [broken, mixed, ...Array.from({ length: 12 }, (_, i) => join(root, `missing-${i}`))] })
+  await skill(f.skillRoot, 'firmware-pack', 'Build firmware')
+  assert.match(text(await f.invoke({ action: 'search', query: '固件' })), /firmware-pack/)
+  const { inventory } = await f.ctx.capabilityGateway.snapshot()
+  const diagnostics = inventory.configDiagnostics
+  assert.equal(diagnostics.complete, false)
+  assert.equal(diagnostics.total, 14)
+  assert.equal(diagnostics.items.length, 10)
+  assert.equal(diagnostics.truncated, true)
+  assert.deepEqual(diagnostics.items.slice(0, 3), [{ source: 'keywordPacks', index: 1, code: 'invalid_json' }, { source: 'keywordPacks', index: 2, code: 'invalid_entries', count: 1, entries: [2] }, { source: 'keywordPacks', index: 3, code: 'file_missing' }])
+  const model = JSON.parse(text(await f.invoke({ action: 'inventory', kind: 'skill' })))
+  assert.equal(model.complete, false)
+  assert.deepEqual(model.configDiagnostics, diagnostics)
+  assert.match(text(await f.invoke({ action: 'status' })), /14 alias warning/)
+  const hint = (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'capability-gateway').text
+  assert.match(hint, /search coverage is incomplete/)
+  assert.ok(!JSON.stringify(diagnostics).includes(root))
+  assert.ok(!JSON.stringify(diagnostics).includes('private-invalid-json-secret'))
+})
+
+test('valid long explicit aliases are not silently shortened or discarded', async t => {
+  const words = Array.from({ length: 21 }, (_, i) => `alias${i}`)
+  words.push('x'.repeat(60))
+  const f = await setup(t, { skillKeywords: { 'firmware-pack': words } })
+  await skill(f.skillRoot, 'firmware-pack', 'Build firmware')
+  for (const query of [words[20], words[21]]) assert.match(text(await f.invoke({ action: 'search', query })), /firmware-pack/)
+  assert.equal((await f.ctx.capabilityGateway.snapshot()).inventory.configDiagnostics.complete, true)
+})
+
+test('alias file shape and read errors stay visible until a corrected configuration is reloaded', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gateway-alias-repair-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'aliases.json')
+  await writeFile(path, '[]')
+  const f = await setup(t, { keywordPacks: [path, root] })
+  const diagnostics = async () => (await f.ctx.capabilityGateway.snapshot()).inventory.configDiagnostics
+  assert.deepEqual((await diagnostics()).items.map(x => x.code), ['invalid_pack', 'file_unreadable'])
+  await writeFile(path, JSON.stringify({ 'firmware-pack': ['固件'] }))
+  assert.equal((await diagnostics()).complete, false, 'file edits alone must not erase the loaded configuration diagnosis')
+  await skill(f.skillRoot, 'firmware-pack', 'Build firmware')
+  await f.fiber.dispose()
+  await f.ctx.plugin(gateway, { skillRoots: [f.skillRoot], mcpServers: ['bosun'], keywordPacks: [path], localAliases: false, logDir: join(f.root, 'reloaded-log') }).await()
+  assert.deepEqual(await diagnostics(), { complete: true, total: 0, shown: 0, truncated: false, items: [] })
+  assert.match(text(await f.invoke({ action: 'search', query: '固件' })), /firmware-pack/)
+})
+
+test('exact skill names bypass stop words only within the visible kind and scope', async t => {
+  const f = await setup(t)
+  await skill(f.skillRoot, 'logs', 'Collect application logs')
+  assert.match(text(await f.invoke({ action: 'search', query: 'LOGS', kind: 'skill' })), /logs \[技能\]/)
+  assert.ok(!(await f.invoke({ action: 'load', name: 'logs' })).isError)
+  assert.ok((await f.invoke({ action: 'search', query: 'logs', kind: 'mcp' })).isError)
+  f.agent.ctx.skills.register({ name: 'logs', description: 'Personal logs', source: 'project-dsh', content: 'Keep personal' })
+  assert.ok((await f.invoke({ action: 'search', query: 'logs', kind: 'skill' })).isError)
+})
+
+test('partial discovery preserves useful results without claiming a complete search or a miss', async t => {
+  const f = await setup(t, { skillRoots: ['/nonexistent/dsh-gateway-partial-fixture'] })
+  f.registerTool()
+  const partial = await f.invoke({ action: 'search', query: 'mcp__bosun__echo' })
+  assert.ok(!partial.isError, text(partial))
+  assert.deepEqual(partial.value.discovery, { complete: false, unavailable: [{ kind: 'skill', code: 'dependency_missing' }] })
+  assert.match(text(partial), /发现不完整/)
+  const status = await f.invoke({ action: 'status' })
+  assert.ok(!status.isError, text(status))
+  assert.match(text(status), /skills: unknown/)
+  assert.match(text(status), /bosun: 1 tools/)
+  const unknown = await f.invoke({ action: 'search', query: 'this sufficiently long unknown query should never use a fallback' })
+  assert.ok(unknown.isError)
+  assert.match(text(unknown), /dependency_missing:.*不能判定为未命中/)
+  const { activity } = await f.ctx.capabilityGateway.snapshot()
+  assert.equal(activity.stats.searchIncomplete, 2)
+  assert.equal(activity.stats.searchMisses, 0)
+  assert.equal(activity.stats.searchFallbacks, 0)
+  assert.ok(activity.events.filter(x => x.action === 'search').every(x => x.discoveryIncomplete))
+})
+
+test('MCP discovery failure leaves managed skills searchable and status reports unknown rather than zero', async t => {
+  const f = await setup(t)
+  await skill(f.skillRoot, 'logs', 'Collect logs')
+  const schemas = f.ctx.tools.schemas
+  f.ctx.tools.schemas = () => { throw new Error('unavailable: private registry failure') }
+  try {
+    const partial = await f.invoke({ action: 'search', query: 'logs' })
+    assert.ok(!partial.isError, text(partial))
+    assert.deepEqual(partial.value.discovery.unavailable, [{ kind: 'mcp', code: 'unavailable' }])
+    const status = await f.invoke({ action: 'status' })
+    assert.ok(!status.isError, text(status))
+    assert.match(text(status), /bosun: unknown/)
+    assert.ok(!text(status).includes('private registry failure'))
+  } finally { f.ctx.tools.schemas = schemas }
+})
+
+test('Host report scopes match the selected agent and never widen invalid selections', async t => {
+  const f = await setup(t)
+  f.registerTool()
+  await f.invoke({ action: 'call', name: 'mcp__bosun__echo' })
+  const selected = await f.ctx.capabilityGateway.report({ format: 'json', historyScope: 'selected', agentId: 'fixture-agent' })
+  const report = JSON.parse(selected.content)
+  assert.deepEqual(report.scope, { kind: 'agent', agentId: 'fixture-agent' })
+  assert.equal(report.stats.calls, 1)
+  assert.match(text(await f.invoke({ action: 'report' })), /报告范围：会话 fixture-agent/)
+  assert.deepEqual(JSON.parse((await f.ctx.capabilityGateway.report({ format: 'json' })).content).scope, { kind: 'all', agentId: null })
+  for (const options of [{ historyScope: 'selected' }, { historyScope: 'all', agentId: 'fixture-agent' }, { historyScope: 'invalid' }]) await assert.rejects(f.ctx.capabilityGateway.report(options), /invalid_arguments/)
+  await assert.rejects(f.ctx.capabilityGateway.report({ historyScope: 'selected', agentId: 'gone-agent' }), /not_found/)
+  await f.ctx.plugin({ apply(ctx) { ctx.provide('sessionTitle', { get: session => ({ title: session.id === 'fixture-agent' ? 'Inspect deployment' : 'Other' }) }) } }).await()
+  assert.equal((await f.ctx.capabilityGateway.snapshot()).agents[0].title, 'Inspect deployment')
 })

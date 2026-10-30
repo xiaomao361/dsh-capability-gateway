@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback, useRef } = React
     const labels = {
       managed: '网关管理', native: '原生保留', native_override: '同名能力由原生提供', not_in_scope: '本会话未纳入', unknown: '待确认',
-      disabled: '配置已停用', plugin_failed: '插件启动失败', tools_registered: '已发现工具', no_tools_observed: '未观察到工具', gateway: '原生目录已精简', 'native-sdk': 'PTC SDK 原生暴露',
+      disabled: '配置已停用', plugin_failed: '插件启动失败', tools_registered: '已发现工具', no_tools_observed: '未观察到工具', gateway: '原生目录已精简', 'gateway-sdk': 'PTC SDK 声明已精简', 'native-sdk': 'PTC SDK 原生暴露',
       search: '搜索', load: '加载 Skill', describe: '查看工具', call: '调用 MCP', invalid: '无效操作',
       success: '成功', error: '失败', cancelled: '已取消', correct: '正确', wrong: '需修正', unreviewed: '未评估',
     }
@@ -96,6 +96,11 @@ window.__ModuleLoader__.load({
       const servers = inventory.mcp.filter(x => managedMatch(x) && (match(x) || x.tools.some(match)))
       const filterKey = `${query}:${kind}:${management}`
       return h(React.Fragment, null,
+        inventory.configDiagnostics?.complete === false && h('div', { className: 'cg-notice cg-error', role: 'status' },
+          h('p', null, `别名配置有 ${inventory.configDiagnostics.total} 项异常，搜索覆盖不完整。修正对应配置或文件后，重新加载插件。`),
+          h('ul', null, inventory.configDiagnostics.items.map((item, index) => h('li', { key: index },
+            `${item.source === 'localAliases' ? '本机别名包' : `keywordPacks 第 ${item.index} 项`}：${({ file_missing: '文件不存在', file_unreadable: '无法读取文件', invalid_json: 'JSON 格式错误', invalid_pack: '应为技能名称到关键词数组的映射', invalid_entries: '包含无效条目' })[item.code] ?? item.code}${item.count ? `（${item.count} 条）` : ''}${item.entries?.length ? `，条目序号：${item.entries.join('、')}${item.count > item.entries.length ? '…' : ''}` : ''}`))),
+          inventory.configDiagnostics.truncated && h('p', null, `当前显示 ${inventory.configDiagnostics.shown} 项，共 ${inventory.configDiagnostics.total} 项异常。`)),
         !inventory.nativeSkillsComplete && h('p', { className: 'cg-notice cg-error', role: 'status' }, '技能发现未完成。清单可能缺项，当前状态不能视为完整接入结果。'),
         inventory.skillRoots.some(root => root.state === 'error') && h('p', { className: 'cg-notice cg-error', role: 'status' }, '部分受管技能目录读取失败，展开下方目录详情查看原因。'),
         inventory.scope === 'host-only' && h('p', { className: 'cg-notice' }, '当前没有活动会话，显示宿主范围；尚不能确认会话预设提供的能力。'),
@@ -139,7 +144,7 @@ window.__ModuleLoader__.load({
         h('p', null, filtered ? '调整结果或操作筛选，查看其他记录。' : '通过网关搜索或调用后，刷新即可查看。记录从启用日志功能后开始。'))
       return h('div', null, events.map(row => h('details', { key: row.id, className: 'cg-record' },
         h('summary', null, h(Icon, { name: 'chevron', className: 'cg-chevron' }),
-          h('span', { className: 'cg-record-title' }, h('strong', { title: row.target ?? undefined }, row.target ?? (row.action === 'search' ? row.matchCount === 0 && row.candidates.length ? `无直接匹配 · ${row.candidates.length} 个路由入口` : row.matchCount === null ? '未提供查询词' : `${row.matchCount ?? '未知'} 个匹配` : '未解析目标')), h('small', null, label(row.action), ' · ', row.route === 'gateway' ? '网关' : '原生直接调用')),
+          h('span', { className: 'cg-record-title' }, h('strong', { title: row.target ?? undefined }, row.target ?? (row.action === 'search' ? row.discoveryIncomplete ? `发现不完整 · ${row.candidates.length} 个候选` : row.matchCount === 0 && row.candidates.length ? `无直接匹配 · ${row.candidates.length} 个路由入口` : row.matchCount === null ? '未提供查询词' : `${row.matchCount ?? '未知'} 个匹配` : '未解析目标')), h('small', null, label(row.action), ' · ', row.route === 'gateway' ? '网关' : '原生直接调用')),
           h('span', { className: 'cg-record-result' }, h('span', { className: 'cg-chip', 'data-tone': row.outcome === 'error' ? 'error' : undefined }, h('i', { className: 'cg-dot', 'aria-hidden': true }), label(row.outcome)), ' · ', row.durationMs === null ? '耗时未知' : `${row.durationMs} ms`,
             h('time', { className: 'cg-timestamp', dateTime: new Date(row.at).toISOString() }, time(row.at)))),
         h('div', { className: 'cg-record-body' }, h('dl', null,
@@ -191,9 +196,11 @@ window.__ModuleLoader__.load({
       const exportReport = async format => {
         setExporting(format); setError('')
         try {
-          const file = await api.report({ format })
+          const selectedAgent = agentId || data?.inventory.agentId
+          if (historyScope === 'selected' && !selectedAgent) throw new Error('请先选择活动会话，再导出该会话的周报。')
+          const file = await api.report({ format, historyScope, ...(historyScope === 'selected' ? { agentId: selectedAgent } : {}) })
           if (!saveFile(file.filename, file.content, format === 'json' ? 'application/json' : 'text/markdown')) {
-            setError('当前环境不支持下载；可以改用 capability action=report 取得同样内容。')
+            setError('当前环境不支持下载；可用 capability action=report 取得调用会话的周报，范围可能与页面不同。')
           }
         } catch (failure) { setError(String(failure.message ?? failure)) }
         finally { setExporting(null) }
@@ -210,8 +217,8 @@ window.__ModuleLoader__.load({
         h('div', { className: 'cg-header' }, h('div', null, h('div', { className: 'cg-brand' }, h(Icon, { name: 'network' }), h('h2', null, '能力网关')), h('p', null, '查看能力接入，追踪搜索与转发。')),
           h('button', { type: 'button', 'aria-label': '刷新快照', disabled: locked, onClick: firstPage }, h(Icon, { name: 'refresh' }), busy ? '正在刷新…' : '刷新')),
         h('div', { className: 'cg-toolbar cg-scope' }, h('label', null, '查看会话', h('select', { value: agentId, disabled: locked, onChange: e => { setAgentId(e.target.value); firstPage() } },
-          h('option', { value: '' }, '自动选择 / 无会话时查看宿主'), (data?.agents ?? []).map(agent => h('option', { key: agent.id, value: agent.id, title: agent.id }, `会话 ${shortSession(agent.id)}`)))),
-          inventory && h('span', { className: 'cg-timestamp cg-muted cg-scope-meta' }, `更新于 ${time(inventory.at)}`)),
+          h('option', { value: '' }, '自动选择 / 无会话时查看宿主'), (data?.agents ?? []).map(agent => h('option', { key: agent.id, value: agent.id, title: agent.id }, agent.title ? `${agent.title} · ${shortSession(agent.id)}` : `会话 ${shortSession(agent.id)}`)))),
+          inventory && h('span', { className: 'cg-timestamp cg-muted cg-scope-meta' }, `当前：${data.agents?.find(agent => agent.id === inventory.agentId)?.title || (inventory.agentId ? shortSession(inventory.agentId) : '宿主范围')} · 更新于 ${time(inventory.at)}`)),
         error && h('p', { className: 'cg-notice cg-error', role: 'alert' }, `读取或保存失败：${error}。${data ? '下方保留上次读取的快照，可能与当前筛选不同；选择“刷新”重试。' : '请确认插件已启用后重试。'}`),
         h('div', { className: 'cg-nav', role: 'group', 'aria-label': '查看内容' }, [['inventory', '接入清单'], ['activity', '转发与统计']].map(([id, title]) => h('button', { key: id, type: 'button', 'aria-pressed': section === id, onClick: () => setSection(id) }, title))),
         h('p', { className: 'cg-update', role: 'status' }, busy && data ? '正在更新，以下暂为上次读取的快照…' : saving ? '正在保存标记…' : ''),
@@ -226,6 +233,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'cg-toolbar cg-scope' }, h('label', null, '记录范围', h('select', { value: historyScope, disabled: locked, onChange: e => { setHistoryScope(e.target.value); firstPage() } }, h('option', { value: 'all' }, '全部会话'), h('option', { value: 'selected' }, '所选活动会话'))),
             h('span', { className: 'cg-chip cg-scope-meta' }, '最近 7 天')),
           !activity.storage.complete && h('p', { role: 'status', className: 'cg-notice cg-error' }, '记录样本不完整或持久化异常，统计只能代表当前可读取部分。', ` 损坏行 ${activity.storage.invalidLines}；写入失败次数 ${activity.storage.writeFailures ?? 0}；读取 ${activity.storage.readError ?? '正常'}；写入 ${activity.storage.writeError ?? '正常'}。`),
+          stats.searchIncomplete > 0 && h('p', { role: 'status', className: 'cg-notice cg-error' }, `${stats.searchIncomplete} 次搜索的能力发现不完整，未计为未命中；当前未命中率不能代表完整检索质量。`),
           h('div', { className: 'cg-stats', 'aria-label': '转发统计' },
             h(Metric, { title: '网关 MCP 调用', primary: true, hint: stats.callRejected > 0 ? `${stats.callRejected} 次未转发` : '已观察到的终态调用' }, stats.calls),
             h(Metric, { title: '调用成功率', primary: true, hint: '分母为实际转发调用' }, percent(stats.callSuccessRate)),
@@ -235,11 +243,11 @@ window.__ModuleLoader__.load({
             h(Metric, { title: '人工标记', warning: stats.reviewedWrong > 0, hint: '正确 / 需修正' }, `${stats.reviewedCorrect} / ${stats.reviewedWrong}`)),
           h('p', { className: 'cg-footnote' }, '调用成功不代表选对能力。展开记录可标记选用是否合适。'),
           h('div', { className: 'cg-toolbar cg-export' },
-            h('button', { type: 'button', 'aria-label': '导出 Markdown 周报', disabled: locked || exporting !== null, onClick: () => exportReport('markdown') }, exporting === 'markdown' ? '正在生成…' : '导出周报'),
-            h('button', { type: 'button', 'aria-label': '导出 JSON 周报', disabled: locked || exporting !== null, onClick: () => exportReport('json') }, exporting === 'json' ? '正在生成…' : '导出 JSON'),
-            h('p', { className: 'cg-footnote' }, '只含计数、名称与状态，不含搜索原文或工具参数；导出后可在本地保存或转交。')),
+            h('button', { type: 'button', 'aria-label': '导出 Markdown 周报', disabled: locked || exporting !== null || Boolean(error), onClick: () => exportReport('markdown') }, exporting === 'markdown' ? '正在生成…' : '导出周报'),
+            h('button', { type: 'button', 'aria-label': '导出 JSON 周报', disabled: locked || exporting !== null || Boolean(error), onClick: () => exportReport('json') }, exporting === 'json' ? '正在生成…' : '导出 JSON'),
+            h('p', { className: 'cg-footnote' }, `导出范围：${historyScope === 'selected' ? '所选活动会话' : '全部会话'}；结果和操作筛选不影响周报。只含计数、名称与状态，不含搜索原文或工具参数。`)),
           h('details', { className: 'cg-disclosure' }, h('summary', null, '统计口径与日志位置'),
-            h('p', null, `最近 7 天、最多 ${activity.storage.maxEvents} 条事件；统计按记录范围计算。候选采用样本 ${stats.correlatedSelections}（只统计返回过候选的搜索）；未关联搜索 ${stats.explicitOrUnlinked}；原生直接调用 ${stats.directCalls}。`),
+            h('p', null, `最近 7 天、最多 ${activity.storage.maxEvents} 条事件；统计按记录范围计算。发现不完整的搜索 ${stats.searchIncomplete ?? 0} 次，未计为未命中。候选采用样本 ${stats.correlatedSelections}（只统计返回过候选的搜索）；未关联搜索 ${stats.explicitOrUnlinked}；原生直接调用 ${stats.directCalls}。`),
             h('p', null, '“调用成功率”只以实际转发到工具的调用为分母，参数校验和可用性拒绝不算失败，但仍计入“网关 MCP 调用”和记录列表。“候选内采用率”观察有候选的搜索后 10 分钟内同一会话的选用情况，不判断语义正确性。Skill 加载成功不代表任务执行成功。无样本的比率显示为 —。'),
             h('p', null, '日志仅含调用元数据，不保存搜索原文、工具参数、返回正文或错误正文。不补造历史。'),
             h('dl', null, h('dt', null, '记录位置'), h('dd', null, h('code', null, activity.storage.directory)))),
@@ -271,7 +279,8 @@ window.__ModuleLoader__.load({
       anchorId: z.string().min(1).max(200).optional(),
     })
     const reviewOptions = () => z.strictObject({ eventId: z.string().min(1), verdict: z.enum(['correct', 'wrong', 'unreviewed']) })
-    const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']).optional() })
+    const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']).optional(),
+      historyScope: z.enum(['all', 'selected']).optional(), agentId: z.string().min(1).max(200).optional() })
     const methodOptions = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions }
     const descriptors = Object.keys(methodOptions).map(method => {
       const codec = { mode: 'strict', typeSymbol: `${PACKAGE}#${method}Options`, create: methodOptions[method] }

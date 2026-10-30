@@ -12,6 +12,7 @@ It is a DeepSeek Harness host + client plugin. It does not proxy remote traffic,
 
 - **Managed skills** leave the model-facing skill catalog. They stay user-invocable and are loaded through `capability`.
 - **Managed MCP servers** keep their native execution path but their tool schemas are removed from the prompt. Calls go through the same native permission and guard chain.
+- **PTC mode** keeps `run_code` and the `capability` SDK binding, while managed MCP declarations are omitted. Search/describe on demand, then call through `tools.capability`. Unsupported host presentation APIs retain the original SDK and report that limitation in status and inventory.
 - **One tool** (`capability`) replaces what would otherwise be dozens of tool definitions.
 - **A bounded name index** is added to the system prompt so the model knows *which* capabilities exist even when lexical search would miss them. Names only — no descriptions, no schemas.
 - **A local journal** records metadata about searches and calls (never query text, arguments or results), and can be exported as a weekly report.
@@ -82,7 +83,7 @@ or a shareable pack, referenced from `keywordPacks`:
 { "release-notes": ["发布说明", "变更记录"] }
 ```
 
-Missing or broken packs are skipped, never fatal. A skill can also declare its own aliases in `SKILL.md` with `keywords:`, which travels with the skill.
+Missing or broken packs do not block startup; valid packs and entries remain usable. Status, inventory and the prompt mark alias coverage as incomplete. Settings identify each affected pack by its configuration index and list invalid entry positions. Correct the file and reload the plugin. Explicit `skillKeywords` must map names to arrays of up to 50 nonempty strings, each at most 80 Unicode characters; invalid values raise `invalid_config` before normalization. A skill can also declare its own aliases in `SKILL.md` with `keywords:`, which travels with the skill.
 
 ## The `capability` tool
 
@@ -100,6 +101,8 @@ Missing or broken packs are skipped, never fatal. A skill can also declare its o
 Search is deliberately conservative. Unmatched queries return `not_found` with a pointer to the native path rather than a fake match, and the gateway never calls an upstream tool on its own.
 
 ## Privacy
+
+Unreleased reports follow the settings page's all-session or selected-session record scope and label it explicitly. An expired selection fails instead of widening the report. Model `action=report` uses the calling session. Exact-name search remains scoped; partial Skill/MCP discovery is marked in text and structured metadata rather than counted as a miss.
 
 Recorded per event: action, target name, route, outcome, error code, duration, candidate names and ranks, plugin version. Not recorded: query text, tool arguments, results, error bodies, credentials, file paths.
 

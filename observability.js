@@ -45,6 +45,7 @@ export function projectEvent(input) {
       return name && ['mcp', 'skill'].includes(x.kind) ? [{ name, kind: x.kind }] : []
     }),
     matchCount: Number.isSafeInteger(input.matchCount) && input.matchCount >= 0 ? input.matchCount : null,
+    discoveryIncomplete: input.discoveryIncomplete === true,
     searchId: cleanId(input.searchId),
     candidateRank: Number.isSafeInteger(input.candidateRank) && input.candidateRank >= 0 ? input.candidateRank : null,
   }
@@ -67,10 +68,11 @@ export function computeStats(operations) {
     callSuccesses: calls.filter(x => x.outcome === 'success').length,
     callErrors: calls.filter(x => x.outcome === 'error').length, callCancelled: calls.filter(x => x.outcome === 'cancelled').length,
     callSuccessRate: dispatchedCalls.length ? dispatchedCalls.filter(x => x.outcome === 'success').length / dispatchedCalls.length : null,
-    searchCount: searches.length, searchMisses: searches.filter(x => x.errorCode === 'not_found' || x.matchCount === 0).length,
+    searchCount: searches.length, searchIncomplete: searches.filter(x => x.discoveryIncomplete).length,
+    searchMisses: searches.filter(x => !x.discoveryIncomplete && (x.errorCode === 'not_found' || x.matchCount === 0)).length,
     // A miss that still showed routing entries: the capability was not found,
     // only a way to keep looking was offered.
-    searchFallbacks: searches.filter(x => x.matchCount === 0 && x.candidates.length > 0).length,
+    searchFallbacks: searches.filter(x => !x.discoveryIncomplete && x.matchCount === 0 && x.candidates.length > 0).length,
     correlatedSelections: correlated.length, insideCandidates: correlated.filter(x => x.candidateRank > 0).length,
     candidateAdoptionRate: correlated.length ? correlated.filter(x => x.candidateRank > 0).length / correlated.length : null,
     explicitOrUnlinked: routes.filter(x => !x.searchId).length,
@@ -184,11 +186,11 @@ export class EventJournal {
   // Aggregates for an exported weekly report: same rows, window and in-memory
   // limits as snapshot(), but without the per-event page. Nothing here reads
   // tool arguments, results, query text or the log directory path.
-  async summary() {
+  async summary({ agentId } = {}) {
     await this.flush()
     this.trim()
     const reviews = new Map(this.rows.filter(x => x.type === 'review').map(x => [x.eventId, x.verdict]))
-    const operations = this.rows.filter(row => row.type === 'operation').map(row => ({ ...row, verdict: reviews.get(row.id) ?? 'unreviewed' }))
+    const operations = this.rows.filter(row => row.type === 'operation' && (agentId === undefined || row.agentId === agentId)).map(row => ({ ...row, verdict: reviews.get(row.id) ?? 'unreviewed' }))
     const stats = computeStats(operations)
     const versions = new Map()
     for (const row of operations) {
@@ -198,6 +200,7 @@ export class EventJournal {
     }
     return {
       generatedAt: this.now(),
+      scope: { kind: agentId === undefined ? 'all' : 'agent', agentId: agentId ?? null },
       pluginVersion: this.pluginVersion,
       window: { days: 7, events: operations.length, from: operations[0]?.at ?? null, to: operations.at(-1)?.at ?? null, truncated: this.truncated },
       storage: { invalidLines: this.invalidLines, readError: this.readError, writeError: this.writeError, writeFailures: this.writeFailures,

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Match exact capability names before lexical stop-word filtering; fix the retrieval gate to measure the first five results and reject a rank-six target.
+- Isolate Skill and MCP discovery failures in search/status. Partial searches expose structured completeness metadata and an allowlisted journal flag, and are not counted as misses or complete routing fallbacks.
+- Export the displayed report session scope, reject missing or expired selections, and label the scope in both report formats. Model reports use the calling session. Show optional native session titles in settings without journaling them.
+
+- Build the skill name index from the calling scope's actual gateway winners at prompt assembly; mark discovery failures as incomplete while retaining the scoped MCP index.
+- Reject invalid explicit skill aliases and management scope configuration before normalization. Keep valid entries from optional alias packs, and expose bounded, text-free diagnostics for missing, unreadable or invalid packs in status, inventory and settings.
+
+- Omit managed MCP declarations from the PTC SDK prompt using the host renderer, while preserving native execution bindings, scoped permissions and guards. Unsupported presentation APIs explicitly retain the original SDK.
+- Fix repeated prompt assembly accumulating stale MCP names in the shared name index when no skill cache is populated.
+- Freeze the report test clock instead of relying on the date the suite happens to run.
+
 ## 0.4.0
 
 - Add a bounded capability name index to the system prompt (`promptIndex`, `promptIndexChars`) so the model knows which managed capabilities exist without lexical search.

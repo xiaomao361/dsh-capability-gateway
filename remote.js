@@ -11,9 +11,9 @@ const snapshotOptions = () => z.strictObject({
   anchorId: z.string().min(1).max(200).optional(),
 })
 const reviewOptions = () => z.strictObject({ eventId: z.string().min(1), verdict: z.enum(['correct', 'wrong', 'unreviewed']) })
-// The report is generated on the Host from allowlisted metadata; the Client only
-// picks the format, so no filter or user text crosses this boundary.
-const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']).optional() })
+// Reports accept only the displayed session scope and format, never user text.
+const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']).optional(),
+  historyScope: z.enum(['all', 'selected']).optional(), agentId: z.string().min(1).max(200).optional() })
 const options = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions }
 export const descriptors = Object.keys(options).map(method => {
   const codec = { mode: 'strict', typeSymbol: `${PACKAGE}#${method}Options`, create: options[method] }

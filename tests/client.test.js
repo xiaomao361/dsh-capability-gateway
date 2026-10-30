@@ -52,6 +52,18 @@ test('native settings panel renders expandable inventory lists and escaped descr
   assert.ok(html.includes('查看会话'))
 })
 
+test('alias diagnostics appear with inventory and give a concrete repair action', () => {
+  const snapshot = { ...fixture, inventory: { ...fixture.inventory, configDiagnostics: {
+    complete: false, total: 12, shown: 2, truncated: true, items: [
+      { source: 'keywordPacks', index: 1, code: 'file_missing' },
+      { source: 'keywordPacks', index: 2, code: 'invalid_entries', count: 2, entries: [1, 3] },
+    ],
+  } } }
+  const html = renderToStaticMarkup(React.createElement(client.GatewayPanel, { api: {}, initialSnapshot: snapshot }))
+  for (const text of ['搜索覆盖不完整', 'keywordPacks 第 1 项', '文件不存在', '条目序号：1、3', '重新加载插件', '当前显示 2 项，共 12 项异常']) assert.ok(html.includes(text), text)
+  assert.ok(html.includes('role="status"'))
+})
+
 test('UI filters inventory and switches to statistics with explicit no-sample states', async () => {
   let renderer
   const api = { snapshot: async options => { assert.ok(Object.values(options).every(value => value !== undefined)); return fixture }, review: async () => ({}) }
@@ -220,8 +232,35 @@ test('stats view exports the Host report in both formats without user text', asy
   await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
   await switchToActivity(renderer)
   await act(async () => namedButton(renderer, '导出 Markdown 周报').props.onClick())
+  await act(async () => namedButton(renderer, '刷新快照').props.onClick())
   await act(async () => namedButton(renderer, '导出 JSON 周报').props.onClick())
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ format: 'markdown' }, { format: 'json' }])
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ format: 'markdown', historyScope: 'all' }, { format: 'json', historyScope: 'all' }])
   assert.ok(JSON.stringify(renderer.toJSON()).includes('只含计数、名称与状态'))
   await act(async () => renderer.unmount())
+})
+
+test('selected report pins the displayed automatic session and exposes the scope', async () => {
+  const calls = []
+  const snapshot = { ...fixture, agents: [{ id: 'fixture-session', title: 'Deployment checks' }] }
+  const api = { snapshot: async () => snapshot, report: async options => { calls.push(options); return { filename: 'scope.md', content: 'fixture' } } }
+  let renderer
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('Deployment checks'))
+  await switchToActivity(renderer)
+  const scope = renderer.root.findAllByType('select').find(x => x.findAllByType('option').some(option => option.props.value === 'selected'))
+  await act(async () => scope.props.onChange({ target: { value: 'selected' } }))
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('导出范围：所选活动会话'))
+  await act(async () => namedButton(renderer, '导出 Markdown 周报').props.onClick())
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ format: 'markdown', historyScope: 'selected', agentId: 'fixture-session' }])
+  assert.equal(namedButton(renderer, '导出 Markdown 周报').props.disabled, true, 'a failed download requires refresh before retrying export')
+  await act(async () => renderer.unmount())
+})
+
+test('incomplete discovery remains visible in activity summary and individual records', () => {
+  const snapshot = { ...fixture, activity: { ...fixture.activity, stats: { ...fixture.activity.stats, searchIncomplete: 1 }, events: [
+    { ...sampleEvent(1), action: 'search', target: null, matchCount: 0, discoveryIncomplete: true, candidates: [] },
+  ] } }
+  const html = renderToStaticMarkup(React.createElement(client.GatewayPanel, { api: {}, initialSnapshot: snapshot, initialSection: 'activity' }))
+  assert.ok(html.includes('1 次搜索的能力发现不完整'))
+  assert.ok(html.includes('发现不完整 · 0 个候选'))
 })

@@ -64,6 +64,8 @@ export function allowsRoutingFallback(query) {
 export function rankCapabilities(candidates, query) {
   const text = normalize(query).trim()
   if (!text) return candidates.map(item => ({ ...item, score: 1 })).sort((a, b) => a.name.localeCompare(b.name))
+  const exact = candidates.filter(item => normalize(item.name) === text)
+  if (exact.length) return exact.map(item => ({ ...item, keywordMatch: false, score: 1000 }))
   const mixedQuery = /\p{Script=Han}/u.test(text)
   const documents = candidates.map(item => {
     const name = normalize(item.name)

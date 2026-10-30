@@ -38,7 +38,7 @@ const names = (catalog, query) => rankCapabilities(catalog, query).map(x => x.na
 
 function evaluate(catalog, tasks, negatives, label) {
   const firstMisses = tasks.filter(([query, expected]) => names(catalog, query)[0] !== expected)
-  const topFiveMisses = tasks.filter(([query, expected]) => !names(catalog, query).includes(expected))
+  const topFiveMisses = tasks.filter(([query, expected]) => !names(catalog, query).slice(0, 5).includes(expected))
   const hit1 = (tasks.length - firstMisses.length) / tasks.length
   const hit5 = (tasks.length - topFiveMisses.length) / tasks.length
   assert.ok(hit5 >= 0.95, `${label} hit@5 ${hit5.toFixed(2)}; missed: ${topFiveMisses.map(([q]) => q).join(' | ')}`)
@@ -51,6 +51,12 @@ function evaluate(catalog, tasks, negatives, label) {
 
 test('retrieval keeps a high hit rate over realistic wording', () => {
   evaluate(synthetic, syntheticTasks, syntheticNegatives, 'synthetic')
+})
+
+test('hit@5 rejects a target ranked sixth even when it exists in the full result', () => {
+  const catalog = Array.from({ length: 6 }, (_, i) => ({ name: `archive-${i}`, detail: 'archive snapshots', kind: 'skill' }))
+  assert.equal(names(catalog, 'archive')[5], 'archive-5')
+  assert.throws(() => evaluate(catalog, [['archive', 'archive-5']], [], 'sixth'), /hit@5 0\.00/)
 })
 
 test('an unknown word no longer vetoes the whole query', () => {

@@ -75,7 +75,7 @@ MCP 清单合并三个来源：
 
 自动检查使用本机安装包的真实 Cordis、ToolRuntime、SkillRegistry、FileSystemSkillProvider、TypertRegistry、TypertGateway；MCP 工具、技能目录、Peer 和存储故障采用隔离夹具。前端通过 React 静态渲染与组件交互测试检查筛选、页面切换、错误和人工标记。此外从安装包根 node_modules 加载真正的 Client Remote/Cordis，执行 apply/$mount、标签页注册、Host 往返、卸载和重载回归；只测试组件或 Host API 不足以证明客户端能启动。
 
-原生 API 的 owner 调用与 non-owner 拒绝已验证。用户已确认 0.2.1 在真实 DSH 中恢复启动、两页可见且功能正常。0.2.3 清单布局的视觉/键盘体验、真实 MCP 调用及真实流量统计仍须应用内逐项验收；自动检查不证明这些已完成。PTC SDK 精简仍未实现，继续如实报告。
+原生 API 的 owner 调用与 non-owner 拒绝已验证。用户已确认 0.2.1 在真实 DSH 中恢复启动、两页可见且功能正常。0.2.3 清单布局的视觉/键盘体验、真实 MCP 调用及真实流量统计仍须应用内逐项验收；自动检查不证明这些已完成。PTC SDK 精简已在后续未发布变更中实现，验证边界见第 20 节。
 
 
 ## 8. 自动发现与显式接管
@@ -203,7 +203,7 @@ mcpKeywords:
 
 - **版本标记**：operation 事件新增 `plugin` 字段，写入时用运行进程的打包版本盖章（读包内 `package.json` 的 `version`，读取失败记 null，不让插件启动失败）。读盘时保留落盘值，因此 0.3.0 之前的事件没有该字段，周报里显示“未记录（0.3.0 之前）”，不会被追认成新版本。review 事件不参与按版本统计。
 - **周报来源**：`EventJournal#summary()` 与 `snapshot()` 共用 `computeStats`，所以两边分母一致；另外按版本分组重算一遍，并给出错误码、调用目标、技能加载、兜底次数、未命中率与兜底率。`report.js` 只负责把 summary 渲染成 Markdown / JSON，自身不读事件、不读参数、不读查询原文。
-- **两个出口**：模型侧 `capability action=report` 返回 Markdown；设置页「导出周报 / 导出 JSON」经 strict Remote `capabilityGateway/report` 取 `{ filename, content }` 后由浏览器写盘。两条路径共用同一份 summary，口径不会分叉。
+- **两个出口**：模型侧 `capability action=report` 返回 Markdown；设置页「导出周报 / 导出 JSON」经 strict Remote `capabilityGateway/report` 取 `{ filename, content }` 后由浏览器写盘。两条路径共用统计实现，后续新增的会话范围规则见第 22 节。
 - **边界**：周报只是单机观察样本，不含查询原文、工具参数、结果正文、错误正文、凭据或日志目录路径；不自动上送，是否转交由用户决定；空窗口用 — 表示缺失而不是 0；样本少于 20 条时明确提示不构成趋势；文件名使用北京时间日期，便于按周归档。
 
 “导出”不等于“已验收成功”：调用成功率只说明上游是否稳定，候选内采用率不判断语义正确性，按版本对比也只在样本足够时才成立。
@@ -296,15 +296,57 @@ node --test tests/retrieval.test.js
 
 - 作用：模型看到 `release-notes` 这样的名字，可以直接 `load`，不必先用词法搜索赌一次；这也让“能力很多时知道有哪些”不再依赖检索命中。
 - 成本：约 2k 字符，对比完整目录（本例 11.7k 字符）仍是数量级差别，且随能力数量增长到上限就停。
-- 边界：名单来自当前 scope 的注册表与技能根目录，不是全库；`promptIndex: false` 可关闭，`promptIndexChars` 可调。名字不等于可用：加载失败仍走原有错误。
-- 实现注意：名单快照独立于技能扫描缓存（`indexNames`），否则启动时的空扫描会污染 provider 缓存两秒，导致刚装的技能“看不见”。
+- 边界：MCP 名单来自当前 scope 的注册表；技能名单在后续未发布变更中改为当前会话的实际网关赢家，见第 21 节。`promptIndex: false` 可关闭，`promptIndexChars` 可调。名字不等于实时可用：加载失败仍走原有错误。
+- 原始实现使用独立名称快照，避免启动时污染 provider 缓存；该快照已被第 21 节的逐会话生成替代。
 
 ### 别名包（`keywordPacks`）
 
-`keywordPacks` 是文件路径数组，每个文件是 `{ "<name>": ["关键词", ...] }`。多个包与 `local/skill-keywords.json`、`skillKeywords` 配置**叠加**而不是覆盖：同一个技能的别名取并集。缺失、损坏或不可读的包直接跳过，不阻塞启动。
+`keywordPacks` 是文件路径数组，每个文件是 `{ "<name>": ["关键词", ...] }`。多个包与 `local/skill-keywords.json`、`skillKeywords` 配置**叠加**而不是覆盖：同一个技能的别名取并集。缺失、损坏或不可读的包不阻塞启动，诊断与部分可用语义见第 21 节。
 
 这样“中文能搜到英文技能”可以变成可分享的数据：社区为公共技能维护一份别名包，使用者按顺序加载多份，插件本身不带任何具体技能名（`tests/portability.test.js` 保证）。
 
 ### 检索集的位置
 
 `tests/retrieval.test.js` 用一份**合成目录**跑 CI（通用名字，不含任何真实技能）；本机的真实快照放在 `local/retrieval.json`（gitignored、不进包），存在时用同一套阈值一起跑，不存在时该用例跳过。开源仓库因此不带某个人的技能清单。
+
+## 20. PTC 按需呈现（未发布）
+
+PTC 的模型入口仍只有宿主 `run_code`。其 `tools:sdk` 提示段保留 `capability` 与所有非受管工具；受管 MCP 工具的完整声明由模型通过 `capability` 的 search/describe 按需取得，再用 `tools.capability({ action: "call", name, arguments })` 调用。技能仍通过 load 读取，不另加执行器。
+
+实现复用宿主 `tools.sdkSection()` 的 SDK 生成器：创建一个只用于渲染的接收对象，将 `sdkSchemas(scope)` 投影为当前 scope 可见且不属于受管服务的工具。其余 mode/runtime 读取委托宿主。组装中仅替换 `tools:sdk` 的文本，保留段落位置及其他属性；不修改共享 ToolRuntime 方法、注册表、执行绑定或权限，也不通过字符串解析裁剪 TypeScript/Python 声明。原生模式沿用 schema 过滤。
+
+这是呈现优化，不是访问控制：隐藏声明的工具仍可被已知名称的原生嵌套调用执行；所有调用继续由原生 scope、guard 和策略决定是否允许。网关内的 schema 校验、Agent、parent、rootCallId、signal、结果与附加上下文转交保持不变。
+
+兼容适配依赖宿主的 `sdkSection`、`sdkSchemas`、`modeFor` 和 `requirePtcRuntime` 方法。它们不是独立的官方过滤扩展点；宿主实现变化仍可能需要适配。缺少方法时保留原 SDK，status 明确显示 `host presentation API unsupported`，清单保留 `native-sdk`；支持时为 `gateway-sdk`。不能宣称旧宿主同样得到精简。已支持的渲染器执行失败直接使提示组装失败，不以空 SDK 或成功状态掩盖错误。
+
+隔离验证针对本机 DSH 0.2.1-rc.5 安装包：TypeScript/Python SDK 过滤、非受管声明保留、原生/PTC 并存、动态注册与移除、禁用与卸载恢复、旧接口回退；通过原生 run_code 调度器接入隔离程序执行夹具，验证 capability 转发和 guard 拒绝。夹具不是实际 PTC 沙箱或真实 MCP，不代表应用端到端验收。
+
+提示名称索引不修改共享扫描缓存，技能名单的逐会话生成见第 21 节。周报日期测试通过 EventJournal 的现有 `now` 注入固定生成时间，覆盖北京时间跨日及未知日期；业务文件名仍按报告生成日命名。
+
+## 21. 会话索引与配置诊断（未发布）
+
+技能名称索引在 `system-prompt/assemble` 的异步阶段调用与 search/load 相同的 `visibleSkills`：按当前 Agent 的工作目录与原生 snapshot 取网关 provider 的实际赢家。被项目、个人或其他原生能力覆盖的同名技能不进入索引；用户专用技能及未安装该会话 overlay 的技能也不进入。删除全局名称快照和启动预扫描，首次提示不依赖一次先行 search。扫描缓存仍由原有失效机制管理，权限与能力选择不跨会话缓存。
+
+技能发现失败时，不返回旧名称或正常空目录；提示明确写入 `Skill name index incomplete` 和白名单错误类别，不含报错正文或路径。独立的 MCP 名单仍按当前 scope 生成，MCP 调用不因技能目录故障停用。`promptHint` 与 `promptIndex` 分别控制指引与名单。
+
+显式 `skillKeywords` 在任何截断、过滤与合并前校验，规则与 `mcpKeywords` 一致：映射到字符串数组，每个名称最多 50 项、每项非空且不超过 80 个 Unicode 字符；不再经过技能 frontmatter 的 20 项/40 字归一化。有效的长别名和第 21 项不会静默消失。多个合法来源取并集，50 项限制按单个来源执行。`skillRoots`、`mcpServers` 和配置对象类型异常也显式拒绝，不把非法范围变成空范围。
+
+文件别名包为可选增强数据。指定文件不存在、不可读、JSON 损坏、顶层非映射，以及条目无效，分别记录固定错误码；包中其他有效条目仍合并。默认本机别名文件不存在属于未配置，不警告；存在但损坏则警告。诊断在加载时生成，修改文件后需重新加载插件。
+
+`inventory.configDiagnostics` 给出 `complete/total/shown/truncated/items`；最多交付 10 项诊断，每项只含来源枚举、包的配置序号、固定错误码、无效条目数与最多 10 个条目序号，不交出路径、别名原文、文件正文或系统错误正文，也不落盘。条目序号按 JSON 映射的解析枚举顺序计数。模型 inventory 同样交付，技能/全部清单在有别名警告时保持 `complete=false`；MCP 范围完整性不受无关的技能别名故障影响。status、名称索引提示与设置页都有不完整说明；页面指明对应包、错误及修正后重载的动作。
+
+隔离回归覆盖首次提示、同名赢家替换与恢复、不同会话/宿主并发组装、用户专用技能、目录错误下 MCP 仍可调用、显式无效配置、包部分有效、诊断限量与无原文泄露，以及设置页异常说明。没有新增落盘用户文本、远端探测或配置写接口。
+
+## 22. 检索边界、故障隔离与报告范围（未发布）
+
+搜索先按 kind 与调用 scope 取得已接管候选，再做经 NFKC/大小写归一化的完整名称匹配；完整名称命中优先返回，不被词法停用词删除。它不读取隐藏能力，也不扩大原生授权。未知词、长任务描述与聚合入口兜底仍按原规则处理。检索评估的 hit@5 只检查排名前 5，新增排名第 6 的反例，避免把全列表召回当作前五命中。
+
+search/status 的技能与 MCP 发现分别执行。search 有可用候选时返回可用部分，同时在正文和结果值的 `discovery: { complete, unavailable }` 明确标记缺失类别；unavailable 只含 kind 与固定错误码。缺失类别不能解释为没有能力。没有候选且存在发现故障时返回发现错误，不返回 not_found；完整发现下的无候选仍为 not_found。status 保留可用类别的状态，将失败类别的数量写作 unknown，不伪造成 0。严格按 kind 查询不受未请求类别的故障影响。
+
+事件白名单新增布尔值 `discoveryIncomplete`，不保存错误正文、查询、参数或结果。统计新增 `searchIncomplete`，不完整搜索不计入 searchMisses 或 searchFallbacks；searchCount 仍是全部搜索次数，现有未命中率分母不变，页面与周报明确提示不能据此评估完整检索质量。旧事件缺字段时不补造历史的部分发现信息，也不能由此证明当时发现完整。JSONL 版本保持 1，字段为兼容性新增。
+
+Remote report 的 Host/Client strict codec 同步增加可选 `historyScope=all|selected` 与 agentId。省略 scope 保留全会话出口；selected 必须提供当前活动 Agent 的确切 ID，缺少、无效或已失效一律失败，不回退为 all。all 不允许同时提供 agentId。UI 从当前选择或实际显示的自动会话快照固定该 ID；读取失败的旧快照状态下禁用导出。结果与操作筛选只作用于列表，不进入报告范围。
+
+`EventJournal.summary({ agentId })` 在任何统计、版本分组、目标、错误与时间范围汇总前按会话筛选，空范围保持空，不能回退到全部。报告新增 `scope` 元数据，Markdown 同样标明全部会话或会话 ID；模型 report 默认使用调用 Agent 的会话，没有 Agent 时才为全部。标题与样本口径共用原渲染器和统计函数。两种出口的默认范围不同，下载不可用时的提示不再承诺模型出口与页面内容相同。
+
+控制台的活动会话列表可读取宿主 sessionTitle 的现有标题，清理空白并截到 80 字，仅用于界面选择和确认；缺失或读取失败时保留 ID。标题不参与会话身份匹配，不进入模型 inventory、事件日志或报告，也不触发生成/修改会话标题。该变更没有新增落盘用户文本。

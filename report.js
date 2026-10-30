@@ -22,6 +22,7 @@ export function reportFilename(summary, format) {
 export function buildReport(summary) {
   const { stats, window: scope, storage, derived } = summary
   const notes = []
+  if (stats.searchIncomplete) notes.push(`- ${stats.searchIncomplete} 次搜索发现不完整，未计为未命中；未命中率不能代表完整检索质量。`)
   if (derived.missRate !== null) notes.push(`- 未命中率 ${pct(derived.missRate)}；兜底率 ${pct(derived.fallbackRate)}。`)
   if (scope.events < 20) notes.push('- 样本少于 20 条，只作单次观察，不构成趋势。')
   if (stats.searchCount === 0) notes.push('- 窗口内没有搜索样本，无法评估词表覆盖。')
@@ -32,6 +33,7 @@ export function buildReport(summary) {
     '',
     `- 生成时间：${beijing(summary.generatedAt)}`,
     `- 运行插件版本：${summary.pluginVersion ?? '未知'}`,
+    `- 报告范围：${summary.scope?.kind === 'agent' ? `会话 ${summary.scope.agentId}` : '全部会话'}`,
     `- 统计窗口：最近 ${scope.days} 天，${scope.events} 条操作样本`,
     `- 样本时间：${beijing(scope.from)} → ${beijing(scope.to)}`,
     '',
