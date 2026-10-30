@@ -18,7 +18,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { randomUUID } from 'node:crypto'
-import { EventJournal, ACTIONS, errorCode } from './observability.js'
+import { EventJournal, ACTIONS, errorCode, hasErrorCode } from './observability.js'
 import { registerRemote } from './remote.js'
 import { rankCapabilities, preview, routingEntries, allowsRoutingFallback } from './search.js'
 import { createArgumentValidator } from './validation.js'
@@ -737,7 +737,7 @@ export function apply(ctx, rawConfig) {
           return typeof value === 'string' ? { content: [{ type: 'text', text: value }] } : value
         } catch (error) {
           const messageText = message(error)
-          if (/^(not_found|unavailable|dependency_missing|execution_failed|invalid_action|invalid_arguments):/.test(messageText)) throw error
+          if (hasErrorCode(messageText)) throw error
           throw new Error(`execution_failed: ${messageText}`)
         }
       },

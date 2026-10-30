@@ -1058,6 +1058,21 @@ test('MCP discovery failure leaves managed skills searchable and status reports 
   } finally { f.ctx.tools.schemas = schemas }
 })
 
+test('an uncoded discovery failure keeps its native_error prefix instead of wrapping it twice', async t => {
+  const f = await setup(t, { skillRoots: [] })
+  const schemas = f.ctx.tools.schemas
+  f.ctx.tools.schemas = () => { throw new TypeError('registry exploded') }
+  let failed
+  try {
+    failed = await f.invoke({ action: 'search', query: 'echo', kind: 'mcp' })
+  } finally { f.ctx.tools.schemas = schemas }
+  assert.ok(failed.isError)
+  assert.match(text(failed), /native_error: 能力发现不完整（mcp: native_error）/)
+  assert.ok(!text(failed).includes('execution_failed'))
+  const { activity } = await f.ctx.capabilityGateway.snapshot()
+  assert.equal(activity.events.at(-1).errorCode, 'native_error')
+})
+
 test('Host report scopes match the selected agent and never widen invalid selections', async t => {
   const f = await setup(t)
   f.registerTool()

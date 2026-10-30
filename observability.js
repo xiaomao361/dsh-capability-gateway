@@ -9,6 +9,12 @@ const MAX_FILE_BYTES = 8 * 1024 * 1024
 const cleanName = value => typeof value === 'string' && /^[A-Za-z0-9_.:/@-]{1,220}$/.test(value) ? value : null
 const cleanId = value => typeof value === 'string' ? value.replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 120) || null : null
 const ERROR_CODES = new Set(['not_found', 'unavailable', 'dependency_missing', 'execution_failed', 'invalid_action', 'invalid_arguments', 'cancelled', 'native_error'])
+// One classification for both the journal and the tool's error passthrough, so
+// an allowlisted prefix is never re-wrapped as execution_failed by a second list.
+export function hasErrorCode(message) {
+  const code = String(message ?? '').match(/^([a-z_]+):/)?.[1]
+  return code !== undefined && ERROR_CODES.has(code)
+}
 export function errorCode(error) {
   const message = error instanceof Error ? error.message : String(error ?? '')
   const code = message.match(/(?:^|Error:\s*)([a-z_]+):/)?.[1]
