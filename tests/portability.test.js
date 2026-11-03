@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-const SHIPPED_CODE = ['index.js', 'search.js', 'validation.js', 'observability.js', 'remote.js', 'report.js', 'client.js']
+const SHIPPED_CODE = ['index.js', 'search.js', 'validation.js', 'observability.js', 'remote.js', 'management.js', 'report.js', 'client.js']
 const VENDOR = /\b(bosun|grafana|metabase|purser|claracore|volcengine|folotoy|passport|dreamina|typesafe|atlas|census)\b/gi
 // Comments explain past regressions by name; only executable text is scanned.
 const stripComments = source => source

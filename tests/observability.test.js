@@ -212,3 +212,14 @@ test('rejected calls stay observable without counting as MCP failures', async t 
   assert.equal(stats.callSuccessRate, 1)
   assert.equal((await journal.snapshot()).stats.callSuccessRate, 1)
 })
+
+test('diagnostic error counts cover the selected window independently of list filters and pages', async t => {
+  const { journal } = await setup(t)
+  journal.record({ agentId: 'a', action: 'search', outcome: 'error', errorCode: 'not_found' })
+  journal.record({ agentId: 'a', action: 'call', outcome: 'error', errorCode: 'invalid_arguments' })
+  journal.record({ agentId: 'b', action: 'call', outcome: 'error', errorCode: 'unavailable' })
+  const result = await journal.snapshot({ agentId: 'a', action: 'call', outcome: 'success', limit: 1 })
+  assert.equal(result.events.length, 0)
+  assert.deepEqual(result.errors, [{ name: 'invalid_arguments', count: 1 }, { name: 'not_found', count: 1 }])
+  assert.equal(result.stats.operations, 2)
+})

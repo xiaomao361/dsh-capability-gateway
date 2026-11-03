@@ -14,13 +14,18 @@ const reviewOptions = () => z.strictObject({ eventId: z.string().min(1), verdict
 // Reports accept only the displayed session scope and format, never user text.
 const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']).optional(),
   historyScope: z.enum(['all', 'selected']).optional(), agentId: z.string().min(1).max(200).optional() })
-const options = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions }
+const configureOptions = () => z.strictObject({ revision: z.string().min(1).max(100),
+  skillRoots: z.array(z.string().trim().min(1).max(4096)).max(200),
+  mcpServers: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,32}$/)).max(500) })
+const probeOptions = () => z.strictObject({ query: z.string().trim().min(1).max(1000),
+  kind: z.enum(['skill', 'mcp']).optional(), agentId: z.string().min(1).max(200).optional() })
+const options = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions, configure: configureOptions, probe: probeOptions }
 export const descriptors = Object.keys(options).map(method => {
   const codec = { mode: 'strict', typeSymbol: `${PACKAGE}#${method}Options`, create: options[method] }
   return {
     id: `${PACKAGE}#capabilityGateway/${method}`, namespace: 'capabilityGateway',
     service: 'capabilityGateway', method, invocation: { kind: 'direct' },
-    parameters: [{ name: 'options', wire: 'options', source: 'json', acceptsUndefined: method !== 'review', codec, strictCodec: codec }],
+    parameters: [{ name: 'options', wire: 'options', source: 'json', acceptsUndefined: ['snapshot', 'report'].includes(method), codec, strictCodec: codec }],
     result: { mode: 'strict', typeSymbol: `${PACKAGE}#${method}Result`, create: () => z.json() },
   }
 })

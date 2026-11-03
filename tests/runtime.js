@@ -41,6 +41,9 @@ export async function loadRuntime() {
     TypertRegistry: (await load('dsh-typert-registry')).default,
     TypertGateway: (await load('dsh-api-gateway')).default,
     Peer: (await load('dsh-client-connection')).Peer,
+    ConfigEditor: (await load('dsh-config-editor')).default,
+    Loader: (await load('cordis-plugin-loader')).default,
+    appBoot: await load('dsh-app-boot'),
   }
 }
 

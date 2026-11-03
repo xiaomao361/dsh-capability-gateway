@@ -182,7 +182,8 @@ export class EventJournal {
     const pageLimit = Math.max(1, Math.min(500, Number(limit) || 100))
     const pageOffset = Math.min(Math.max(0, Math.trunc(Number(offset) || 0)), Math.max(0, Math.ceil(filtered.length / pageLimit) - 1) * pageLimit)
     return {
-      stats, events: filtered.slice(pageOffset, pageOffset + pageLimit), total: filtered.length,
+      stats, errors: tally(operations.filter(row => row.errorCode), row => row.errorCode, 8),
+      events: filtered.slice(pageOffset, pageOffset + pageLimit), total: filtered.length,
       offset: pageOffset, limit: pageLimit, anchorId: operations[anchorIndex]?.id ?? null,
       storage: { directory: this.directory, windowDays: 7, maxEvents: MAX_EVENTS, truncated: this.truncated,
         invalidLines: this.invalidLines, readError: this.readError, writeError: this.writeError, writeFailures: this.writeFailures,

@@ -35,7 +35,9 @@ Register the bundle in `~/.dsh/profiles/<profile>/package.json` so the plugin la
 }
 ```
 
-Then declare what it manages:
+After installation, open **Settings → Built-in plugins → Capability gateway → 配置**. Select MCP services and skill directories, review additions/removals, then save. The host persists and reloads the config; refresh to confirm the effective scope. Hosts without a configuration editor retain existing behavior and can use native configuration management.
+
+Alternatively, configure the scope manually:
 
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml
@@ -84,6 +86,16 @@ or a shareable pack, referenced from `keywordPacks`:
 ```
 
 Missing or broken packs do not block startup; valid packs and entries remain usable. Status, inventory and the prompt mark alias coverage as incomplete. Settings identify each affected pack by its configuration index and list invalid entry positions. Correct the file and reload the plugin. Explicit `skillKeywords` must map names to arrays of up to 50 nonempty strings, each at most 80 Unicode characters; invalid values raise `invalid_config` before normalization. A skill can also declare its own aliases in `SKILL.md` with `keywords:`, which travels with the skill.
+
+## Settings workflows
+
+The panel separates inventory, configuration, usage statistics and runtime records. Configure scope and try searches in Configuration, export reports from Usage statistics, and inspect individual events in Runtime records.
+
+- **Scope selection** lists observable MCP services and suggested skill directories, while retaining configured entries that are currently unavailable. Suggested directories are inferred from visible file paths; verify them or enter a different local directory. Managing a directory includes skills added there later. New services/directories are never selected automatically. Saving changes only `skillRoots` and `mcpServers`, preserving all other configuration and the existing wrapping switches.
+- **Search lab** uses the viewed session and the same managed-catalog ranking as model searches. It displays exact-name, alias, lexical or routing-entry reasons and ranking scores, which are not confidence values. It never executes MCP tools, journals queries or affects usage statistics. Refresh or change sessions to start a new trial.
+- **Effects and diagnostics** shows expected MCP declaration counts for the current inventory and presentation mode. Skills are counted separately; no token or cost savings are inferred. Call diagnostics use all retained events in the selected history scope, independent of list filters and pagination. Direct calls are observations, not automatic defects.
+
+Concurrent configuration edits are rejected. Refresh and reload the selection before editing again. If saving disconnects or fails, confirm the effective scope before retrying. Page-based scope saving requires the host's configuration editor for this plugin entry.
 
 ## The `capability` tool
 

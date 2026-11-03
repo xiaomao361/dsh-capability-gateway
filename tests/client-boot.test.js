@@ -115,3 +115,19 @@ test('native Client plugin activates, registers its tab, calls Host and fully un
     assert.equal(f.client.get('remote.capabilityGateway'), undefined)
   }
 })
+
+test('browser Remote calls the search lab and reports unsupported scope editing without boot failure', async t => {
+  const f = await setup(t)
+  const plugin = f.client.plugin(f.plugin)
+  await plugin.await()
+  const api = f.registrations.get('capability-gateway').inject().api
+  const result = await api.probe({ query: 'fixture', kind: 'mcp' })
+  assert.equal(result.state, 'not_found')
+  assert.equal(result.scope, 'host-only')
+  assert.equal(f.calls.at(-1).endpoint, 'capabilityGateway/probe')
+  await assert.rejects(api.probe({ query: '' }), /validation|invalid/i)
+  const snapshot = await api.snapshot({})
+  assert.equal(snapshot.management.writable, false)
+  await assert.rejects(api.configure({ revision: 'stale', skillRoots: [], mcpServers: [] }), /unavailable/)
+  await plugin.dispose()
+})

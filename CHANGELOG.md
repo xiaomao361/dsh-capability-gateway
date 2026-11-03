@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 — 2026-11-03
+
+- Declare DSH `0.2.1-rc.5` as the verified host version.
+
+- Separate capability inventory, configuration, usage statistics and runtime records. Let the host settings pane scroll the paginated lists.
+
+- Keep MCP routing advice out of skill-only alias matches. Persist normalized, deduplicated scope values and verify the edit revision against the effective config supplied under the host lock.
+
+- Select managed MCP services and skill directories from settings, preview additions/removals, and persist through the host configuration editor. Preserve other settings and unavailable configured entries; reject stale revisions and keep package defaults unchanged.
+- Add a session-scoped search lab using the model search ranking, with exact-name, alias, lexical and routing-entry explanations. Trials never dispatch tools or journal user queries.
+- Show expected MCP declaration counts separately from managed skill counts, plus actionable discovery, PTC, storage and routing diagnostics. Aggregate error categories over the full selected history window, independently of list filters.
+- Extend Host/Client strict Remote codecs additively with `configure` and `probe`; retain existing tool actions, configuration keys and JSONL/report versions.
+
 ## 0.5.0
 
 - Match exact capability names before lexical stop-word filtering; fix the retrieval gate to measure the first five results and reject a rank-six target.

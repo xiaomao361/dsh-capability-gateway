@@ -59,7 +59,7 @@ test('alias diagnostics appear with inventory and give a concrete repair action'
       { source: 'keywordPacks', index: 2, code: 'invalid_entries', count: 2, entries: [1, 3] },
     ],
   } } }
-  const html = renderToStaticMarkup(React.createElement(client.GatewayPanel, { api: {}, initialSnapshot: snapshot }))
+  const html = renderToStaticMarkup(React.createElement(client.GatewayPanel, { api: {}, initialSnapshot: snapshot, initialSection: 'config' }))
   for (const text of ['搜索覆盖不完整', 'keywordPacks 第 1 项', '文件不存在', '条目序号：1、3', '重新加载插件', '当前显示 2 项，共 12 项异常']) assert.ok(html.includes(text), text)
   assert.ok(html.includes('role="status"'))
 })
@@ -78,13 +78,13 @@ test('UI filters inventory and switches to statistics with explicit no-sample st
   const input = renderer.root.findByProps({ type: 'search' })
   await act(async () => input.props.onChange({ target: { value: 'no-match' } }))
   assert.ok(JSON.stringify(renderer.toJSON()).includes('没有符合条件'))
-  const button = renderer.root.findAllByType('button').find(x => x.children.join('') === '转发与统计')
+  const button = renderer.root.findAllByType('button').find(x => x.children.join('') === '使用统计')
   await act(async () => button.props.onClick())
   const output = JSON.stringify(renderer.toJSON())
-  assert.ok(output.includes('调用成功不代表选对能力'))
+  assert.ok(output.includes('如需评价能力选择'))
   assert.ok(output.includes('—'))
   assert.ok(!output.includes('0.0%'))
-  assert.ok(output.includes('还没有调用记录'))
+  assert.ok(!output.includes('还没有调用记录'))
   await act(async () => renderer.unmount())
 })
 
@@ -121,7 +121,7 @@ function sampleEvent(index) {
 }
 const namedButton = (renderer, name) => renderer.root.findByProps({ 'aria-label': name })
 const selectWithOption = (renderer, value) => renderer.root.findAllByType('select').find(control => control.findAllByType('option').some(option => option.props.value === value))
-const switchToActivity = async renderer => act(async () => renderer.root.findAllByType('button').find(button => button.children.join('') === '转发与统计').props.onClick())
+const switchView = async (renderer, title = '使用统计') => act(async () => renderer.root.findAllByType('button').find(button => button.children.join('') === title).props.onClick())
 
 test('large inventory and server tool sets render bounded pages and reset after filtering', async () => {
   const inventory = { ...fixture.inventory,
@@ -155,7 +155,7 @@ test('record paging, page size, direct jump and filters request the complete dat
       events: filtered.slice(options.offset, options.offset + options.limit), total: filtered.length, offset: options.offset, limit: options.limit, anchorId: 'event-206' } }
   }, review: async () => ({}) }
   await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
-  await switchToActivity(renderer)
+  await switchView(renderer, '运行日志')
   assert.equal(renderer.root.findAllByProps({ className: 'cg-record' }).length, 10)
   await act(async () => namedButton(renderer, '调用记录下一页').props.onClick())
   assert.equal(requests.at(-1).offset, 10)
@@ -172,7 +172,9 @@ test('record paging, page size, direct jump and filters request the complete dat
   assert.equal(requests.at(-1).offset, 0)
   assert.equal(requests.at(-1).outcome, 'error')
   assert.equal(requests.at(-1).anchorId, undefined)
+  await switchView(renderer)
   assert.ok(JSON.stringify(renderer.toJSON()).includes('50.2%'))
+  await switchView(renderer, '运行日志')
   await act(async () => namedButton(renderer, '调用记录末页').props.onClick())
   assert.equal(requests.at(-1).offset, 100)
   assert.equal(renderer.root.findAllByProps({ className: 'cg-record' }).length, 3)
@@ -189,7 +191,7 @@ test('failed page requests preserve prior data, show an error, and refresh recov
     return { ...fixture, activity: { ...fixture.activity, events: [sampleEvent(5)], total: 50, offset: 0, limit: 10, anchorId: 'event-5' } }
   }, review: async () => ({}) }
   await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
-  await switchToActivity(renderer)
+  await switchView(renderer, '运行日志')
   fail = true
   await act(async () => namedButton(renderer, '调用记录下一页').props.onClick())
   assert.ok(renderer.root.findByProps({ role: 'alert' }).children.join('').includes('上次读取的快照'))
@@ -216,7 +218,7 @@ test('inventory failures beyond the visible page and incomplete statistics stay 
   let renderer
   const api = { snapshot: async () => ({ ...fixture, activity: { ...fixture.activity, storage: { ...fixture.activity.storage, complete: false, invalidLines: 1 } } }) }
   await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
-  await switchToActivity(renderer)
+  await switchView(renderer)
   assert.ok(JSON.stringify(renderer.toJSON()).includes('统计只能代表当前可读取部分'))
   await act(async () => renderer.unmount())
 })
@@ -230,7 +232,7 @@ test('stats view exports the Host report in both formats without user text', asy
   }
   let renderer
   await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
-  await switchToActivity(renderer)
+  await switchView(renderer)
   await act(async () => namedButton(renderer, '导出 Markdown 周报').props.onClick())
   await act(async () => namedButton(renderer, '刷新快照').props.onClick())
   await act(async () => namedButton(renderer, '导出 JSON 周报').props.onClick())
@@ -246,7 +248,7 @@ test('selected report pins the displayed automatic session and exposes the scope
   let renderer
   await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
   assert.ok(JSON.stringify(renderer.toJSON()).includes('Deployment checks'))
-  await switchToActivity(renderer)
+  await switchView(renderer)
   const scope = renderer.root.findAllByType('select').find(x => x.findAllByType('option').some(option => option.props.value === 'selected'))
   await act(async () => scope.props.onChange({ target: { value: 'selected' } }))
   assert.ok(JSON.stringify(renderer.toJSON()).includes('导出范围：所选活动会话'))
@@ -261,6 +263,146 @@ test('incomplete discovery remains visible in activity summary and individual re
     { ...sampleEvent(1), action: 'search', target: null, matchCount: 0, discoveryIncomplete: true, candidates: [] },
   ] } }
   const html = renderToStaticMarkup(React.createElement(client.GatewayPanel, { api: {}, initialSnapshot: snapshot, initialSection: 'activity' }))
-  assert.ok(html.includes('1 次搜索的能力发现不完整'))
+  const statsHtml = renderToStaticMarkup(React.createElement(client.GatewayPanel, { api: {}, initialSnapshot: snapshot, initialSection: 'stats' }))
+  assert.ok(statsHtml.includes('1 次搜索的能力发现不完整'))
+  assert.ok(!statsHtml.includes('发现不完整 · 0 个候选'))
   assert.ok(html.includes('发现不完整 · 0 个候选'))
+})
+
+const scopeFixture = { writable: true, revision: 'revision-1', skillRoots: ['/fixture'], mcpServers: ['bosun'], rootChoices: ['/fixture', '/another'] }
+const byText = (renderer, name) => renderer.root.findAllByType('button').find(button => button.children.join('') === name)
+
+test('scope editor preserves configured but undiscovered services and previews explicit changes before saving', async () => {
+  const calls = []
+  let renderer
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.ScopeEditor, {
+    management: { ...scopeFixture, mcpServers: ['undiscovered'] }, inventory: fixture.inventory,
+    api: { configure: async options => { calls.push(options); return { message: 'saved' } } }, onSaved: async () => {},
+  })) })
+  const check = value => renderer.root.findAllByType('label').find(label => label.findAllByType('code').some(code => code.children.join('') === value)).findByType('input')
+  assert.equal(check('undiscovered').props.checked, true)
+  assert.equal(check('bosun').props.checked, false)
+  assert.equal(calls.length, 0)
+  await act(async () => check('bosun').props.onChange({ target: { checked: true } }))
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('MCP 服务：新增 1，移除 0'))
+  await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }))
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ revision: 'revision-1', skillRoots: ['/fixture'], mcpServers: ['undiscovered', 'bosun'] }])
+  await act(async () => renderer.unmount())
+})
+
+test('scope editor keeps unsaved choices across refresh and refuses stale overwrites until reloaded', async () => {
+  const props = { management: scopeFixture, inventory: fixture.inventory, api: {}, onSaved: async () => {} }
+  let renderer
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.ScopeEditor, props)) })
+  const extra = renderer.root.findAllByType('label').find(label => label.findAllByType('code').some(code => code.children.join('') === '/another')).findByType('input')
+  await act(async () => extra.props.onChange({ target: { checked: true } }))
+  await act(async () => renderer.update(React.createElement(client.ScopeEditor, { ...props, management: { ...scopeFixture, revision: 'revision-2' } })))
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('技能目录：新增 1，移除 0'))
+  assert.equal(byText(renderer, '保存接管范围').props.disabled, true)
+  await act(async () => byText(renderer, '重新载入选择').props.onClick())
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('接管范围未变化'))
+  await act(async () => renderer.unmount())
+})
+
+test('scope save failure is visible and never reports success', async () => {
+  let renderer
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.ScopeEditor, {
+    management: scopeFixture, inventory: fixture.inventory, api: { configure: async () => { throw new Error('disk unavailable') } }, onSaved: async () => assert.fail('must not refresh as a successful save'),
+  })) })
+  await act(async () => renderer.root.findAllByType('input').find(input => input.props.type === 'checkbox' && input.props.checked).props.onChange({ target: { checked: false } }))
+  await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }))
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('尚未确认保存成功'))
+  assert.ok(renderer.root.findByProps({ role: 'alert' }).children.join('').includes('disk unavailable'))
+  await act(async () => renderer.unmount())
+})
+
+test('search lab shows ranking reasons, ignores stale responses and submits the exact viewed session', async () => {
+  let renderer
+  let resolveFirst
+  const calls = []
+  const result = { complete: true, state: 'matched', matchCount: 1, scope: 'live-agent', unavailable: [], results: [{ kind: 'skill', name: 'fixture-skill', description: 'Fixture', reason: 'alias', score: 12 }] }
+  const api = { probe: options => { calls.push(options); return calls.length === 1 ? new Promise(resolve => { resolveFirst = resolve }) : Promise.resolve(result) } }
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.SearchLab, { api, agentId: 'exact-session' })) })
+  const query = () => renderer.root.findByProps({ maxLength: 1000 })
+  await act(async () => query().props.onChange({ target: { value: 'old query' } }))
+  let first
+  await act(async () => { first = renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }) })
+  await act(async () => query().props.onChange({ target: { value: 'new query' } }))
+  await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }))
+  await act(async () => { resolveFirst({ ...result, state: 'not_found', results: [] }); await first })
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('别名匹配'))
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('非置信度'))
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { query: 'new query', agentId: 'exact-session' })
+  await act(async () => renderer.unmount())
+})
+
+test('search lab distinguishes routing, incomplete discovery and request failures', async () => {
+  let response = { complete: false, state: 'incomplete', matchCount: 0, scope: 'host-only', unavailable: [{ kind: 'skill', code: 'dependency_missing' }], results: [] }
+  let renderer
+  const api = { probe: async () => { if (response instanceof Error) throw response; return response } }
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.SearchLab, { api })) })
+  await act(async () => renderer.root.findByProps({ maxLength: 1000 }).props.onChange({ target: { value: 'fixture query' } }))
+  const submit = () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} })
+  await act(submit)
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('不能据此判断未命中'))
+  response = { ...response, complete: true, state: 'routing', unavailable: [] }
+  await act(submit)
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('尚未确认下游能力'))
+  response = new Error('transport unavailable')
+  await act(submit)
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('transport unavailable'))
+  assert.ok(!JSON.stringify(renderer.toJSON()).includes('尚未确认下游能力'))
+  await act(async () => renderer.unmount())
+})
+
+test('diagnostics separates counts and PTC fallback, and never equates direct calls with a defect', () => {
+  const html = renderToStaticMarkup(React.createElement(client.Diagnostics, { inventory: { ...fixture.inventory, mcp: [{ ...fixture.inventory.mcp[0], presentation: 'native-sdk', toolCount: 10 }] },
+    activity: { ...fixture.activity, stats: { ...fixture.activity.stats, directCalls: 2 }, errors: [{ name: 'invalid_arguments', count: 3 }] },
+  }))
+  assert.ok(html.includes('10 → 10'))
+  assert.ok(html.includes('未支持 PTC 声明精简'))
+  assert.ok(html.includes('可能来自显式调用'))
+  assert.ok(html.includes('检查工具参数与 schema'))
+  assert.ok(html.includes('少于 20 条'))
+})
+
+test('confirmed save refreshes the scope baseline without requiring a second reload action', async () => {
+  let renderer
+  let management = scopeFixture
+  const props = { inventory: fixture.inventory, api: { configure: async () => ({ message: '保存完成' }) }, onSaved: async () => {
+    management = { ...scopeFixture, revision: 'revision-2', mcpServers: [] }
+    renderer.update(React.createElement(client.ScopeEditor, { ...props, management }))
+    return { management }
+  } }
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.ScopeEditor, { ...props, management })) })
+  const server = renderer.root.findAllByType('label').find(label => label.findAllByType('code').some(code => code.children.join('') === 'bosun')).findByType('input')
+  await act(async () => server.props.onChange({ target: { checked: false } }))
+  await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }))
+  const output = JSON.stringify(renderer.toJSON())
+  assert.ok(output.includes('保存完成'))
+  assert.ok(output.includes('接管范围未变化'))
+  assert.ok(!output.includes('请重新载入选择后继续编辑'))
+  await act(async () => renderer.unmount())
+})
+
+test('configuration keeps the draft across views and statistics opens filtered runtime records', async () => {
+  let renderer
+  const requests = []
+  const snapshot = { ...fixture, management: scopeFixture, activity: {
+    ...fixture.activity, stats: { ...fixture.activity.stats, searchMisses: 2 },
+  } }
+  const api = { snapshot: async options => { requests.push(options); return snapshot } }
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
+  await switchView(renderer, '配置')
+  const server = renderer.root.findAllByType('label').find(row => row.findAllByType('code').some(code => code.children.join('') === 'bosun')).findByType('input')
+  await act(async () => server.props.onChange({ target: { checked: false } }))
+  await switchView(renderer, '能力清单')
+  await switchView(renderer, '配置')
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('MCP 服务：新增 0，移除 1'))
+  await switchView(renderer)
+  await act(async () => byText(renderer, '查看相关记录').props.onClick())
+  assert.equal(byText(renderer, '运行日志').props['aria-pressed'], true)
+  assert.equal(requests.at(-1).action, 'search')
+  assert.equal(requests.at(-1).offset, 0)
+  await act(async () => renderer.unmount())
 })

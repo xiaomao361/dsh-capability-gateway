@@ -23,6 +23,7 @@ import { registerRemote } from './remote.js'
 import { rankCapabilities, preview, routingEntries, allowsRoutingFallback } from './search.js'
 import { createArgumentValidator } from './validation.js'
 import { buildReport, reportFilename } from './report.js'
+import { createManagement } from './management.js'
 
 const PROVIDER = 'capability-gateway'
 // Stamped onto every recorded event so a weekly report can separate what was
@@ -39,6 +40,7 @@ export const inject = ['tools', 'skills', 'systemPrompt']
 
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
+  const management = createManagement(ctx, config, normalizeConfig)
 
   if (!config.enabled) {
     ctx.logger?.info?.('capability gateway disabled by config; native exposure retained')
@@ -362,7 +364,7 @@ export function apply(ctx, rawConfig) {
     return discovery
   }
 
-  async function search(query, limit, exec, kind) {
+  async function searchSelection(query, limit, exec, kind) {
     const { skills, mcp, unavailable } = await discoverCapabilities(exec, kind)
     const candidates = [
       ...skills.map(skill => ({ kind: 'skill', name: skill.name, detail: skill.description, whenToUse: skill.whenToUse,
@@ -381,20 +383,25 @@ export function apply(ctx, rawConfig) {
     const listing = !String(query ?? '').trim()
     const fallback = !scored.length && entries.length > 0 && allowsRoutingFallback(query)
     const top = (fallback ? entries : scored).slice(0, limit)
+    return { top, listing, fallback, matchCount: listing ? null : scored.length, total: candidates.length, unavailable }
+  }
+
+  async function search(query, limit, exec, kind) {
+    const { top, listing, fallback, matchCount, total, unavailable } = await searchSelection(query, limit, exec, kind)
     const routingTarget = top.find(item => item.kind === 'mcp' && (fallback || item.keywordMatch))
     const trace = traceOf(exec)
-    if (trace) Object.assign(trace, { candidates: top.map(({ kind, name }) => ({ kind, name })), matchCount: listing ? null : scored.length, discoveryIncomplete: unavailable.length > 0 })
+    if (trace) Object.assign(trace, { candidates: top.map(({ kind, name }) => ({ kind, name })), matchCount, discoveryIncomplete: unavailable.length > 0 })
     if (!top.length) {
       if (unavailable.length) throw new Error(`${unavailable[0].code}: 能力发现不完整（${unavailable.map(x => `${x.kind}: ${x.code}`).join('; ')}）；当前可用范围没有候选，不能判定为未命中。用 action=inventory 查看异常。`)
       throw new Error('not_found: 网关范围内无匹配；这里只搜索已接管的第三方能力，不代表 DSH 没有此能力。原生、项目或未纳入能力请按原方式使用。可缩小为能力名称或短关键词，或用 kind=skill|mcp 收窄；长任务描述不推荐通用 MCP 入口。查看完整接入清单请到设置 → 内置插件 → 能力网关。')
     }
     const text = [
       ...(unavailable.length ? [`发现不完整（${unavailable.map(x => `${x.kind}: ${x.code}`).join('; ')}）。以下仅为当前可用部分；缺失类别的能力未知。`] : []),
-      listing ? `未提供查询词，按名称列出 ${top.length} 项（共 ${candidates.length} 项已接管能力）。`
+      listing ? `未提供查询词，按名称列出 ${top.length} 项（共 ${total} 项已接管能力）。`
         : fallback ? '无直接匹配。以下 MCP 入口可继续检索与路由，不代表已找到目标能力或确认下游可用。'
-          : `网关范围内匹配 ${scored.length} 项，返回 ${top.length} 项。只含已接管能力；原生/未纳入能力按原方式使用。`,
+          : `网关范围内匹配 ${matchCount} 项，返回 ${top.length} 项。只含已接管能力；原生/未纳入能力按原方式使用。`,
       ...top.map(item => `- ${item.name} [${item.kind === 'skill' ? '技能' : `${fallback || item.keywordMatch ? 'MCP入口' : 'MCP服务'}：${item.server}`}] — ${preview(item.detail) || '暂无说明'}`),
-      ...(top.some(item => item.keywordMatch) ? ['服务关键词仅定位到 MCP 入口，尚未查询下游服务。'] : []),
+      ...(top.some(item => item.kind === 'mcp' && item.keywordMatch) ? ['服务关键词仅定位到 MCP 入口，尚未查询下游服务。'] : []),
       routingTarget
         ? `下一步：先 action=describe, name="${routingTarget.name}" 查看参数，再按 schema 用 action=call 将原查询交给该入口继续检索；不自动调用。`
         : '技能：action=load；MCP：action=describe → call。可用 kind=skill|mcp 收窄。',
@@ -579,9 +586,27 @@ export function apply(ctx, rawConfig) {
           limit: options.limit, offset: options.offset, anchorId: options.anchorId, outcome: ['success', 'error', 'cancelled'].includes(options.outcome) ? options.outcome : undefined,
           action: ['search', 'load', 'describe', 'call'].includes(options.action) ? options.action : undefined }),
       ])
-      return { inventory: catalog, activity,
+      return { inventory: catalog, activity, management: management.snapshot(catalog),
         agents: agents.map(x => ({ id: identity({ agent: x }), title: agentTitle(x) })).filter(x => x.id),
         config: { wrapSkills: config.wrapSkills, wrapMcp: config.wrapMcp },
+      }
+    },
+    async configure(options) { return management.save(options) },
+    async probe(options) {
+      if (!options || typeof options.query !== 'string' || !options.query.trim() || options.query.length > 1000) throw new Error('invalid_arguments: 请输入 1–1000 字的查询')
+      if (options.kind !== undefined && !['skill', 'mcp'].includes(options.kind)) throw new Error('invalid_arguments: invalid kind')
+      const agents = liveAgents()
+      const agent = options.agentId ? agents.find(x => identity({ agent: x }) === options.agentId) : agents[0]
+      if (options.agentId && !agent) throw new Error('not_found: 会话已失效，请刷新后重试')
+      const selection = await searchSelection(options.query, config.maxResults, { agent, signal: new AbortController().signal }, options.kind)
+      const complete = selection.unavailable.length === 0
+      return { agentId: agent ? identity({ agent }) : null, scope: agent ? 'live-agent' : 'host-only',
+        complete, aliasCoverageComplete: options.kind === 'mcp' || config.diagnostics.complete,
+        unavailable: selection.unavailable, total: selection.total, matchCount: selection.matchCount,
+        state: !complete ? 'incomplete' : selection.fallback ? 'routing' : selection.top.length ? 'matched' : 'not_found',
+        results: selection.top.map((item, index) => ({ rank: index + 1, name: item.name, kind: item.kind,
+          description: preview(item.detail), score: selection.fallback ? null : item.score,
+          reason: selection.fallback ? 'routing' : item.keywordMatch ? 'alias' : item.name.normalize('NFKC').toLowerCase() === options.query.trim().normalize('NFKC').toLowerCase() ? 'exact' : 'lexical' })),
       }
     },
     async review(options) {
