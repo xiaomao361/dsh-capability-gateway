@@ -4,24 +4,28 @@ English | [中文](README.zh.md)
 
 One on-demand gateway for opted-in third-party skills and MCP tools in [DeepSeek Harness](https://deepseek.com).
 
-Install enough MCP servers or skills and two things happen: the model's tool catalog grows until it crowds out the actual task, and the model starts choosing worse because every capability is equally visible. This plugin hides the ones you opt in and serves them through a single `capability` tool: search by intent, read the schema or instructions, then call.
+Large tool catalogs compete for prompt space. This plugin serves selected skills and MCP tools through a single `capability` tool. Search by intent, read the schema or instructions, and invoke the capability on demand. Catalog trimming depends on the host version and tool mode.
 
 It is a DeepSeek Harness host + client plugin. It does not proxy remote traffic, does not add a server, and does not send anything anywhere.
 
 ## What it changes
 
 - **Managed skills** leave the model-facing skill catalog. They stay user-invocable and are loaded through `capability`.
-- **Managed MCP servers** keep their native execution path but their tool schemas are removed from the prompt. Calls go through the same native permission and guard chain.
-- **PTC mode** keeps `run_code` and the `capability` SDK binding, while managed MCP declarations are omitted. Search/describe on demand, then call through `tools.capability`. Unsupported host presentation APIs retain the original SDK and report that limitation in status and inventory.
-- **One tool** (`capability`) replaces what would otherwise be dozens of tool definitions.
+- **Managed MCP servers** are searchable and callable on demand through the gateway. Calls use the host's permission and guard chain. In native mode, DSH `0.2.1-rc.5` supports trimming tool declarations and DSH `0.2.2-rc.1` retains them.
+- **PTC mode** keeps `run_code` and the `capability` SDK binding. Where the host supports SDK trimming, the gateway omits managed MCP declarations. Search or inspect tools on demand and call them through `tools.capability`. Status and inventory show when the host retains the original SDK.
+- **One tool** (`capability`) searches, inspects, and invokes managed capabilities.
 - **A bounded name index** is added to the system prompt so the model knows *which* capabilities exist even when lexical search would miss them. Names only — no descriptions, no schemas.
 - **A local journal** records metadata about searches and calls (never query text, arguments or results), and can be exported as a weekly report.
 
 ## Install
 
+Starting with 0.6.1, the gateway accepts DSH 0.2 releases and prereleases from `0.2.1-rc.5` onward. Upgrades within that range require no plugin update to pass the compatibility check. DSH 0.3 prereleases and releases require separate validation. The gateway selects the host API at runtime. Automated regression covers `0.2.1-rc.5` and `0.2.2-rc.1`.
+
 ```sh
 # from your DSH profile directory
-pnpm add link:/path/to/dsh-capability-gateway   # or: pnpm add dsh-capability-gateway
+pnpm add link:/path/to/dsh-capability-gateway
+# Or install a local package: pnpm add /path/to/dsh-capability-gateway-0.6.1.tgz
+# For npm, choose a published version that supports your DSH version.
 ```
 
 Register the bundle in `~/.dsh/profiles/<profile>/package.json` so the plugin layer is applied:

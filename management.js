@@ -5,7 +5,15 @@ import { basename, dirname } from 'node:path'
 // Never expose the raw config (it may contain unrelated private values).
 export function createManagement(ctx, config, validate) {
   const editorOf = () => ctx.get('configEditor')
-  const entryOf = editor => editor?.entries?.().find(entry => entry.fiber === ctx.fiber)
+  const entryOf = editor => {
+    const fiber = ctx.fiber
+    if (fiber.uid == null) return undefined
+    // The host can wrap the same fiber in a contextual proxy. Its registry UID
+    // and owning entry ID still identify the active instance across wrappers.
+    return editor?.entries?.().find(entry => entry.fiber === fiber ||
+      (entry.fiber?.uid === fiber.uid && entry.fiber.context?.root === ctx.root &&
+        entry.options.id === fiber.entry?.options?.id))
+  }
   const revisionOf = (entry, raw = entry.options.config ?? {}) => createHash('sha256').update(JSON.stringify([entry.fiber.uid, raw])).digest('hex')
   function snapshot(inventory) {
     const editor = editorOf()

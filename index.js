@@ -2,8 +2,8 @@
  * Capability gateway — one on-demand entry for opt-in third-party skills and MCP tools.
  *
  * Native reuse:
- * - MCP discovery and execution remain native. Native tool schemas are filtered
- *   at prompt assembly; dispatch retains the calling agent, token and guards.
+ * - MCP discovery and execution remain native. Where the host permits it,
+ *   native tool schemas are filtered without changing dispatch or guards.
  *   PTC SDK declarations use the host renderer with only unmanaged schemas.
  * - Per-agent skill providers hide opted-in skills while retaining the native
  *   project/runtime/personal precedence and explicit user invocation.
@@ -48,6 +48,8 @@ export function apply(ctx, rawConfig) {
   }
 
   const validateArguments = createArgumentValidator()
+  const hasScopedExecutors = typeof ctx.tools.selectExecutor === 'function'
+  const hasLegacyToolMode = !hasScopedExecutors && typeof ctx.tools.modeFor === 'function'
   // Presentation adapter only: never replace methods on the live registry or
   // restrict execution to hide declarations. Older hosts retain their SDK and
   // report native-sdk explicitly. Rendering errors still fail prompt assembly.
@@ -58,6 +60,27 @@ export function apply(ctx, rawConfig) {
     requirePtcRuntime: mode => ctx.tools.requirePtcRuntime(mode),
     sdkSchemas: scope => ctx.tools.sdkSchemas(scope).filter(schema => !serverOf(schema.name)),
   }) : null
+  function toolPresentation(scope) {
+    if (hasLegacyToolMode) {
+      const mode = ctx.tools.modeFor(scope)
+      return { mode, presentation: mode === 'native' ? 'gateway' : ptcSdkSection ? 'gateway-sdk' : 'native-sdk' }
+    }
+    const unknown = { mode: 'unknown', presentation: 'unknown' }
+    if (!hasScopedExecutors) return unknown
+    let executor
+    try { executor = ctx.tools.selectExecutor(scope) }
+    catch (error) {
+      if (error?.code !== 'TOOL_EXECUTOR_UNAVAILABLE') throw error
+      return unknown
+    }
+    if (!executor) return unknown
+    const sdk = executor.sections?.find(section => section.name === 'tools:sdk')
+    if (!sdk) return { mode: 'native', presentation: 'native' }
+    if (typeof sdk.text === 'function' && typeof ctx.tools.definitions === 'function') {
+      return { mode: 'ptc', presentation: 'gateway-sdk', sdk }
+    }
+    return { mode: 'ptc', presentation: 'native-sdk' }
+  }
   const controls = new Set()
   let skillCache = { at: 0, skills: [], error: undefined }
 
@@ -235,7 +258,7 @@ export function apply(ctx, rawConfig) {
   function wrappedSchemas(exec) {
     if (!config.wrapMcp || config.mcpServers.length === 0) return []
     const prefixes = config.mcpServers.map((server) => `mcp__${server}__`)
-    return ctx.tools.schemas(exec?.agent).filter((schema) => prefixes.some((prefix) => schema.name.startsWith(prefix)))
+    return ctx.tools.schemas(exec?.agent, exec?.toolSet).filter((schema) => prefixes.some((prefix) => schema.name.startsWith(prefix)))
   }
 
   function serverOf(toolName) {
@@ -249,7 +272,7 @@ export function apply(ctx, rawConfig) {
   // globally: that loses the caller's scoped policies and model/account context.
   ctx.on('system-prompt/assemble', async (assembly, context, next) => {
     const result = await next()
-    const names = new Set(wrappedSchemas({ agent: context.scope }).map((tool) => tool.name))
+    const names = new Set(wrappedSchemas({ agent: context.scope, toolSet: context.toolSet }).map((tool) => tool.name))
     let index = []
     let indexError = null
     if (config.promptIndex) {
@@ -258,10 +281,19 @@ export function apply(ctx, rawConfig) {
       index.push(...names)
     }
     return { ...result,
-      tools: result.tools.filter((tool) => !names.has(tool.name)),
+      ...(hasLegacyToolMode && Array.isArray(result.tools) && { tools: result.tools.filter((tool) => !names.has(tool.name)) }),
       sections: result.sections.map(section => {
         if (section.name === 'capability-gateway') return { ...section, text: promptText(index, indexError) }
-        if (section.name === 'tools:sdk' && ctx.tools.modeFor(context.scope) !== 'native' && names.size && ptcSdkSection) return { ...section, text: ptcSdkSection.text(context) }
+        if (section.name === 'tools:sdk' && names.size) {
+          if (hasLegacyToolMode && ptcSdkSection && ctx.tools.modeFor(context.scope) !== 'native') {
+            return { ...section, text: ptcSdkSection.text(context) }
+          }
+          const { sdk } = hasScopedExecutors ? toolPresentation(context.scope) : {}
+          if (section.text && sdk) {
+            const definitions = ctx.tools.definitions(context.scope, context.toolSet)
+            return { ...section, text: sdk.text(definitions.filter(tool => !names.has(tool.name))) }
+          }
+        }
         return section
       }),
     }
@@ -470,7 +502,7 @@ export function apply(ctx, rawConfig) {
     }
     setTarget(exec, schema.name, 'mcp')
     validateArguments(schema.name, schema.parameters ?? { type: 'object', properties: {} }, args === undefined ? {} : args)
-    const result = await ctx.tools.execute({
+    const input = {
       callId: `cap-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name,
       arguments: args ?? {},
@@ -478,7 +510,23 @@ export function apply(ctx, rawConfig) {
       agent: exec.agent,
       parent: exec.token,
       rootCallId: exec.rootCallId ?? exec.callId,
-    })
+    }
+    let result
+    if (hasScopedExecutors) {
+      // Top-level execute() only accepts batches. Use the selected executor's
+      // nested pipeline, retaining step admission, policy, and call lineage.
+      const { pipeline } = ctx.tools.selectExecutor(exec.agent)
+      if (!['prepare', 'dispatch', 'complete'].every(method => typeof pipeline?.[method] === 'function')) {
+        throw new Error('unavailable: the selected executor does not support nested MCP calls')
+      }
+      const prepared = await pipeline.prepare({ ...input, toolSet: exec.toolSet })
+      const outcome = prepared.kind === 'dispatch' ? await pipeline.dispatch(prepared.exec) : prepared
+      result = await pipeline.complete(prepared.exec, outcome)
+    } else if (hasLegacyToolMode && typeof ctx.tools.execute === 'function') {
+      result = await ctx.tools.execute(input)
+    } else {
+      throw new Error('unavailable: the host does not support gateway MCP calls')
+    }
     if (result.isError) throw new Error(`execution_failed: ${contentText(result) || 'the MCP server reported an error'}`)
     for (const context of result.additionalContexts ?? []) exec.deferContext(context)
     return result
@@ -541,7 +589,7 @@ export function apply(ctx, rawConfig) {
       groups.get(match[1]).push({ name: schema.name, description: bound(schema.description, 240) ?? '' })
     }
     const registrations = server => [...(configurations.get(server)?.values() ?? [])]
-    const mode = ctx.tools.modeFor(exec.agent)
+    const { mode, presentation } = toolPresentation(exec.agent)
     return {
       at: Date.now(), agentId: identity(exec), scope: exec.agent ? 'live-agent' : 'host-only', mode,
       nativeSkillsComplete: native.complete,
@@ -555,7 +603,7 @@ export function apply(ctx, rawConfig) {
           : registrations(name).some(x => x.phase === 'failed') ? 'plugin_failed' : 'no_tools_observed',
         registrations: registrations(name),
         tools, toolCount: tools.length,
-        presentation: !config.wrapMcp || !config.mcpServers.includes(name) ? 'native' : mode === 'native' ? 'gateway' : ptcSdkSupported ? 'gateway-sdk' : 'native-sdk',
+        presentation: config.wrapMcp && config.mcpServers.includes(name) ? presentation : 'native',
       })),
     }
   }
@@ -636,14 +684,21 @@ export function apply(ctx, rawConfig) {
       const count = mcp.filter((schema) => serverOf(schema.name) === server).length
       return `${server}: ${mcpUnknown ? 'unknown (discovery failed)' : count === 0 ? 'unavailable (no tools registered)' : `${count} tools`}`
     })
-    const mode = ctx.tools.modeFor(exec?.agent)
+    const { presentation } = toolPresentation(exec?.agent)
+    const mcpPresentation = {
+      gateway: `${mcp.length} tools omitted from native schemas`,
+      'gateway-sdk': `${mcp.length} tools omitted from PTC SDK declarations; use tools.capability inside run_code`,
+      'native-sdk': 'PTC SDK retains native tool exposure (host presentation API unsupported); gateway calls remain scoped',
+      native: 'host retains native MCP declarations; gateway calls remain scoped',
+      unknown: 'unknown (host presentation unavailable)',
+    }
     return [
       'Capability gateway: enabled',
       `discovery: ${unavailable.length ? `incomplete (${unavailable.map(x => `${x.kind}: ${x.code}`).join('; ')})` : 'complete'}`,
       'View inventory and routing activity in 设置 → 内置插件 → 能力网关.',
       `skills: ${unavailable.some(x => x.kind === 'skill') ? 'unknown (discovery failed)' : `${skills.length} managed`} from ${config.skillRoots.join(', ') || '(none)'} — model catalog hidden, user invocation kept`,
       `mcp: ${config.mcpServers.length} wrapped server(s) — ${perServer.join('; ') || '(none)'}`,
-      `MCP presentation: ${mcpUnknown ? 'unknown (discovery failed)' : !config.wrapMcp ? 'native exposure (MCP wrapping disabled)' : mode === 'native' ? `${mcp.length} tools omitted from native schemas` : ptcSdkSupported ? `${mcp.length} tools omitted from PTC SDK declarations; use tools.capability inside run_code` : 'PTC SDK retains native tool exposure (host presentation API unsupported); gateway calls remain scoped'}`,
+      `MCP presentation: ${mcpUnknown ? 'unknown (discovery failed)' : !config.wrapMcp ? 'native exposure (MCP wrapping disabled)' : mcpPresentation[presentation]}`,
       `gateway tool: ${TOOL_NAME} (search / describe / load / call / status / inventory / history / stats / report)`,
       `report: ${PLUGIN_VERSION ? `version ${PLUGIN_VERSION} tags each event` : 'version unknown (package manifest unreadable); report rows stay unattributed'}`,
       `skill aliases: ${config.skillKeywords.size} skill(s) carry searchable synonyms`,
@@ -682,7 +737,7 @@ export function apply(ctx, rawConfig) {
     ctx.tools.register({
       name: TOOL_NAME,
       description:
-        'Search and use opted-in third-party skills and MCP tools. Native catalogs are reduced; code-mode SDK exposure is reported by status. ' +
+        'Search and use opted-in third-party skills and MCP tools. Check status for the host’s current MCP presentation. ' +
         'Actions: search finds candidates by goal; load returns a skill\'s full instructions plus its base directory; ' +
         'describe returns one MCP tool\'s exact schema; call invokes an MCP tool with JSON arguments; status gives a summary; inventory returns counts, roots and bounded anomalies; history/stats show this session\'s recent routing metadata. ' +
         'Search covers only opted-in capabilities; use native/project/unmanaged capabilities through their original entry points.',
@@ -775,7 +830,7 @@ export function apply(ctx, rawConfig) {
   // search/describe/load.
   const promptText = (names = [], indexError = null) => {
     const messages = []
-    if (config.promptHint) messages.push('Some third-party capabilities are gated behind the `capability` tool and are absent from the tool catalog. Search it before concluding that an external skill or MCP tool is unavailable.')
+    if (config.promptHint) messages.push('Some third-party capabilities are available through the `capability` tool. Search it before concluding that an external skill or MCP tool is unavailable.')
     if (indexError) messages.push(`Skill name index incomplete (${indexError}); skill availability is unknown. MCP names below remain scoped. Check capability inventory before relying on the skill index.`)
     if (!config.diagnostics.complete) messages.push(`Alias configuration has ${config.diagnostics.total} warning(s); search coverage is incomplete. Inspect capability inventory configDiagnostics.`)
     const hint = messages.join('\n')
@@ -789,7 +844,7 @@ export function apply(ctx, rawConfig) {
       length += name.length + 2
     }
     const more = names.length > shown.length ? ` …+${names.length - shown.length} more` : ''
-    return `${hint}\n\nManaged capabilities (hidden from the native catalog; open one with capability load <skill> or describe/call <mcp tool>):\n${shown.join(', ')}${more}`
+    return `${hint}\n\nManaged capabilities (open one with capability load <skill> or describe/call <mcp tool>):\n${shown.join(', ')}${more}`
   }
   if (config.promptHint || config.promptIndex) {
     ctx.effect(() =>

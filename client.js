@@ -253,6 +253,7 @@ window.__ModuleLoader__.load({
       const stats = activity.stats
       const total = inventory.mcp.reduce((sum, row) => sum + row.toolCount, 0)
       const hidden = inventory.mcp.filter(row => ['gateway', 'gateway-sdk'].includes(row.presentation)).reduce((sum, row) => sum + row.toolCount, 0)
+      const presentationUnknown = inventory.mode === 'unknown'
       const managedSkills = inventory.skills.filter(row => row.managed).length
       const issues = []
       const add = (condition, text, action) => { if (condition) issues.push({ text, action }) }
@@ -263,6 +264,8 @@ window.__ModuleLoader__.load({
       add(inventory.mcp.some(row => row.state === 'no_tools_observed'), '部分 MCP 未观察到工具。请检查加载、连接与会话权限；这不等同于离线。')
       add(inventory.mcpConfigurationObserved === false, 'MCP 配置发现不完整。未加载的服务可能没有列出。')
       add(inventory.mcp.some(row => row.presentation === 'native-sdk'), '当前宿主未支持 PTC 声明精简。受管 MCP 仍原生暴露，请核对宿主兼容版本。')
+      add(inventory.mcp.some(row => row.managed && row.presentation === 'native'), '原生模式保留受管 MCP 的工具声明，仍可通过网关检索和调用。')
+      add(presentationUnknown, '当前宿主无法确认 MCP 工具声明。')
       add(!activity.storage.complete, '日志样本不完整，当前统计不能代表全部调用。请检查日志读取与写入状态。')
       add(stats.searchMisses > 0, `${stats.searchMisses} 次搜索未命中。请用搜索试验区检查名称、范围与别名。`, { action: 'search' })
       add(stats.searchIncomplete > 0, `${stats.searchIncomplete} 次搜索发现不完整。请先处理接入异常，再评价检索质量。`, { action: 'search' })
@@ -272,7 +275,7 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'cg-feature cg-panel', 'aria-label': '效果与异常诊断' },
         h('div', { className: 'cg-list-heading' }, h('h3', null, '效果与异常诊断')),
         h('div', { className: 'cg-feature-body' },
-          h('p', null, `当前查看范围内，MCP 原生声明预计 ${total} → ${total - hidden} 项；${managedSkills} 项技能由网关按需提供。另保留一个 capability 入口。`),
+          h('p', null, `当前查看范围内，MCP 原生声明预计 ${total} → ${presentationUnknown ? '待确认' : total - hidden} 项；${managedSkills} 项技能由网关按需提供。另保留一个 capability 入口。`),
           h('p', { className: 'cg-footnote' }, '按当前注册清单与呈现模式计算，不代表 token 或费用节省。技能与 MCP 计数不相加。调用诊断沿用记录范围，不受列表筛选影响。'),
           !(stats.operations >= 20) && h('p', { className: 'cg-footnote' }, '调用样本少于 20 条，暂不据此判断趋势。'),
           !issues.length && h('p', { role: 'status' }, '当前快照与保留记录中未发现上述异常；不代表上游实时健康。'),

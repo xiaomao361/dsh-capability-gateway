@@ -366,6 +366,19 @@ test('diagnostics separates counts and PTC fallback, and never equates direct ca
   assert.ok(html.includes('少于 20 条'))
 })
 
+test('diagnostics distinguishes retained declarations from unknown presentation', () => {
+  const render = (mode, presentation) => renderToStaticMarkup(React.createElement(client.Diagnostics, {
+    inventory: { ...fixture.inventory, mode, mcp: [{ ...fixture.inventory.mcp[0], presentation }] },
+    activity: fixture.activity,
+  }))
+  const native = render('native', 'native')
+  assert.ok(native.includes('1 → 1'))
+  assert.ok(native.includes('原生模式保留受管 MCP 的工具声明'))
+  const unknown = render('unknown', 'unknown')
+  assert.ok(unknown.includes('1 → 待确认'))
+  assert.ok(unknown.includes('无法确认 MCP 工具声明'))
+})
+
 test('confirmed save refreshes the scope baseline without requiring a second reload action', async () => {
   let renderer
   let management = scopeFixture

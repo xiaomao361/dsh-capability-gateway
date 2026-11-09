@@ -1,6 +1,6 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as gateway from '../index.js'
@@ -10,6 +10,34 @@ const runtime = await loadRuntime()
 after(async () => { if (runtime.extracted) await rm(runtime.extracted, { recursive: true, force: true }) })
 const { Context, SystemPrompt, ToolRuntime, SkillRegistry, filesystem, createScope } = runtime
 
+const scopedExecutors = Boolean(runtime.NativeExecutor)
+
+test('DSH compatibility admits later 0.2 releases and rejects 0.3 prereleases', { skip: !scopedExecutors }, async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const check = version => runtime.appBoot.evaluatePluginCompatibility(manifest, {}, version)
+  for (const version of ['0.2.1-rc.5', '0.2.2-rc.1', '0.2.2', '0.2.3-rc.1']) {
+    assert.equal(check(version), undefined, version)
+  }
+  for (const version of ['0.2.1-rc.4', '0.3.0-rc.1', '0.3.0']) {
+    assert.ok(check(version), version)
+  }
+})
+
+async function executeFixture(ctx, input) {
+  if (!scopedExecutors) return ctx.tools.execute(input)
+  if (input.parent) {
+    const { pipeline } = ctx.tools.selectExecutor(input.agent)
+    const prepared = await pipeline.prepare(input)
+    const outcome = prepared.kind === 'dispatch' ? await pipeline.dispatch(prepared.exec) : prepared
+    return pipeline.complete(prepared.exec, outcome)
+  }
+  const batch = await ctx.tools.execute({
+    calls: [{ type: 'toolCall', id: input.callId, name: input.name, arguments: JSON.stringify(input.arguments) }],
+    agent: input.agent, signal: input.signal, toolSet: input.toolSet,
+  })
+  return batch.results[0].result
+}
+
 async function setup(t, config = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-gateway-fixture-'))
   const skillRoot = join(root, 'external')
@@ -18,6 +46,7 @@ async function setup(t, config = {}) {
   t.after(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(SystemPrompt, {}).await()
   await ctx.plugin(ToolRuntime, {}).await()
+  if (scopedExecutors) await ctx.plugin(runtime.NativeExecutor).await()
   await ctx.plugin(SkillRegistry, {}).await()
   const owner = ctx.plugin({ inject: ['tools', 'skills', 'systemPrompt'], apply() {} })
   await owner.await()
@@ -30,19 +59,24 @@ async function setup(t, config = {}) {
   })
   await fiber.await()
   let calls = 0
-  function registerTool(name = 'mcp__bosun__echo', render) {
+  function registerTool(name = 'mcp__bosun__echo', render, options) {
     return ctx.tools.register({
       name, description: 'Echo diagnostic fixture',
       parameters: { type: 'object', properties: { value: { type: 'string' } }, additionalProperties: false },
       output: { schema: { type: 'string' }, render: render ?? ((_args, value) => [{ type: 'text', text: value }]) },
       execute(args, exec) { calls++; assert.equal(exec.agent, agent); return args.value ?? 'ok' },
-    })
+    }, options)
   }
-  const invoke = (args, opts = {}) => ctx.tools.execute({
+  const invoke = (args, opts = {}) => executeFixture(ctx, {
     callId: 'gateway-fixture-call', name: 'capability', arguments: args,
     signal: new AbortController().signal, agent, ...opts,
   })
-  return { ctx, fiber, agent, root, skillRoot, registerTool, invoke, calls: () => calls }
+  async function enablePtc() {
+    if (scopedExecutors) await agent.ctx.plugin(runtime.PtcExecutor, {}).await()
+    else agent.ctx.tools.presentAs('ptc')
+  }
+  const sdkSchemas = () => scopedExecutors ? ctx.tools.schemas(agent) : ctx.tools.sdkSchemas(agent)
+  return { ctx, fiber, agent, root, skillRoot, registerTool, invoke, enablePtc, sdkSchemas, calls: () => calls }
 }
 
 function text(result) { return result.content.filter(x => x.type === 'text').map(x => x.text).join('\n') }
@@ -60,12 +94,12 @@ test('activation injects systemPrompt and registers gateway + prompt hint', asyn
   assert.ok(prompt.sections.some(x => x.name === 'capability-gateway'))
 })
 
-test('native prompt hides only selected MCP schemas and proxy retains caller', async t => {
+test('native prompt follows the host presentation contract and proxy retains caller', async t => {
   const f = await setup(t)
   f.registerTool()
   f.registerTool('mcp__other__echo')
   const prompt = await f.ctx.systemPrompt.assemble({ scope: f.agent })
-  assert.ok(!prompt.tools.some(x => x.name === 'mcp__bosun__echo'))
+  assert.equal(prompt.tools.some(x => x.name === 'mcp__bosun__echo'), scopedExecutors)
   assert.ok(prompt.tools.some(x => x.name === 'mcp__other__echo'))
   assert.ok(f.ctx.tools.get('mcp__bosun__echo', f.agent))
   assert.match(text(await f.invoke({ action: 'describe', name: 'mcp__bosun__echo' })), /Parameters \(JSON Schema\)/)
@@ -84,6 +118,47 @@ test('scoped restrictions prevent discovery and calling; no global bypass', asyn
   assert.match(text(result), /unavailable:/)
   assert.equal(f.calls(), 0)
   assert.ok((await f.invoke({ action: 'describe', name: 'mcp__bosun__echo' })).isError)
+})
+
+test('scoped executor dispatch respects the host step admission', { skip: !scopedExecutors }, async t => {
+  const f = await setup(t)
+  let admitted = false
+  f.registerTool(undefined, undefined, { when: () => admitted })
+  const signal = new AbortController().signal
+  const args = { action: 'call', name: 'mcp__bosun__echo' }
+  const resolve = () => f.ctx.tools.resolve({ agent: f.agent, signal, modelSelection: { provider: 'fixture', model: 'fixture' } })
+  const denied = await resolve()
+  t.after(() => denied.dispose())
+  admitted = true
+  const allowed = await resolve()
+  t.after(() => allowed.dispose())
+  const blocked = await f.invoke(args, { signal, toolSet: denied })
+  assert.ok(blocked.isError)
+  assert.match(text(blocked), /unavailable:/)
+  assert.equal(f.calls(), 0)
+  assert.ok(!(await f.invoke(args, { signal, toolSet: allowed })).isError)
+  assert.equal(f.calls(), 1)
+})
+
+test('missing nested execution API reports failure without calling the MCP tool', { skip: !scopedExecutors }, async t => {
+  const f = await setup(t)
+  f.registerTool()
+  const native = f.ctx.tools.selectExecutor()
+  await f.agent.ctx.plugin({ apply(ctx) {
+    ctx.tools.setExecutor({
+      describe: tools => native.describe(tools),
+      execute: input => native.execute(input),
+      pipeline: { prepare() { assert.fail('a partial pipeline must not start') } },
+    })
+  } }).await()
+  const result = await f.invoke({ action: 'call', name: 'mcp__bosun__echo' })
+  assert.ok(result.isError)
+  assert.match(text(result), /unavailable:.*does not support nested MCP calls/)
+  assert.equal(f.calls(), 0)
+  const { activity } = await f.ctx.capabilityGateway.snapshot()
+  assert.equal(activity.stats.callSuccesses, 0)
+  assert.equal(activity.events[0].errorCode, 'unavailable')
+  assert.equal(activity.events[0].dispatched, false)
 })
 
 test('scoped monotonic guard still blocks gateway proxy', async t => {
@@ -230,15 +305,18 @@ test('PTC SDK hides managed declarations while keeping scoped execution and nati
   f.registerTool()
   f.registerTool('mcp__other__echo')
   await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
-  f.agent.ctx.tools.presentAs('ptc')
+  await f.enablePtc()
   const prompt = await f.ctx.systemPrompt.assemble({ scope: f.agent })
   const sdk = prompt.sections.find(x => x.name === 'tools:sdk').text
   assert.ok(!sdk.includes('mcp__bosun__echo'))
   assert.ok(sdk.includes('mcp__other__echo'))
   assert.ok(sdk.includes('capability'))
-  assert.ok(sdk.length < f.ctx.tools.sdkSection().text({ scope: f.agent }).length, 'managed declarations must reduce the SDK prompt')
+  const original = scopedExecutors
+    ? f.ctx.tools.selectExecutor(f.agent).renderSdk(f.ctx.tools.definitions(f.agent))
+    : f.ctx.tools.sdkSection().text({ scope: f.agent })
+  assert.ok(sdk.length < original.length, 'managed declarations must reduce the SDK prompt')
   assert.deepEqual(prompt.tools.map(x => x.name), ['run_code'])
-  assert.ok(f.ctx.tools.sdkSchemas(f.agent).some(x => x.name === 'mcp__bosun__echo'), 'execution registry stays intact')
+  assert.ok(f.sdkSchemas().some(x => x.name === 'mcp__bosun__echo'), 'execution registry stays intact')
   const status = await f.invoke({ action: 'status' }, { parent: {} })
   assert.ok(!status.isError, text(status))
   assert.match(text(status), /1 tools omitted from PTC SDK declarations/)
@@ -265,8 +343,8 @@ test('native run_code dispatches capability through the scheduler and preserves 
       },
     })
   } }).await()
-  f.agent.ctx.tools.presentAs('ptc')
-  const run = () => f.ctx.tools.execute({ callId: 'ptc-root', name: 'run_code',
+  await f.enablePtc()
+  const run = () => executeFixture(f.ctx, { callId: 'ptc-root', name: 'run_code',
     arguments: { code: 'return await tools.capability({ action: "call", name: "mcp__bosun__echo", arguments: { value: "ptc-ok" } })', description: 'Isolated gateway call' },
     signal: new AbortController().signal, agent: f.agent })
   const success = await run()
@@ -284,7 +362,7 @@ test('PTC rendering stays scoped, updates with tools, and unload restores declar
   const f = await setup(t, { wrapSkills: false })
   const remove = f.registerTool()
   await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
-  f.agent.ctx.tools.presentAs('ptc')
+  await f.enablePtc()
   const sdk = async () => (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'tools:sdk').text
   const first = await sdk()
   const second = await sdk()
@@ -294,11 +372,11 @@ test('PTC rendering stays scoped, updates with tools, and unload restores declar
   const snapshot = await f.ctx.capabilityGateway.snapshot({ agentId: 'fixture-agent' })
   assert.equal(snapshot.inventory.mcp.find(x => x.name === 'bosun').presentation, 'gateway-sdk')
   const native = await f.ctx.systemPrompt.assemble()
-  assert.ok(!native.tools.some(x => x.name === 'mcp__bosun__echo'))
-  assert.ok(!native.sections.some(x => x.name === 'tools:sdk'))
+  assert.equal(native.tools.some(x => x.name === 'mcp__bosun__echo'), scopedExecutors)
+  assert.ok(!native.sections.some(x => x.name === 'tools:sdk' && x.text))
   remove()
   assert.ok(!(await hint()).includes('mcp__bosun__echo'), 'removed tools must not linger in the name index')
-  assert.ok(!f.ctx.tools.sdkSchemas(f.agent).some(x => x.name === 'mcp__bosun__echo'))
+  assert.ok(!f.sdkSchemas().some(x => x.name === 'mcp__bosun__echo'))
   f.registerTool('mcp__bosun__new')
   assert.ok(!(await sdk()).includes('mcp__bosun__new'))
   await f.fiber.dispose()
@@ -310,7 +388,7 @@ test('Python PTC SDK uses the host renderer and omits only managed tools', async
   f.registerTool()
   f.registerTool('mcp__other__echo')
   await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'python', programFormat: 'program' }) } }).await()
-  f.agent.ctx.tools.presentAs('ptc')
+  await f.enablePtc()
   const prompt = await f.ctx.systemPrompt.assemble({ scope: f.agent })
   const sdk = prompt.sections.find(x => x.name === 'tools:sdk').text
   assert.ok(!sdk.includes('mcp__bosun__echo'))
@@ -322,8 +400,8 @@ test('PTC renderer failures stay explicit instead of yielding an empty successfu
   const f = await setup(t)
   f.registerTool()
   await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'unsupported-fixture', programFormat: 'program' }) } }).await()
-  f.agent.ctx.tools.presentAs('ptc')
-  await assert.rejects(f.ctx.systemPrompt.assemble({ scope: f.agent }), /no SDK renderer registered/)
+  await f.enablePtc()
+  await assert.rejects(f.ctx.systemPrompt.assemble({ scope: f.agent }), /no SDK renderer registered|render is not a function/)
 })
 
 test('disabled and unwrapped PTC gateways leave the host SDK unchanged', async t => {
@@ -331,13 +409,13 @@ test('disabled and unwrapped PTC gateways leave the host SDK unchanged', async t
     const f = await setup(t, config)
     f.registerTool()
     await f.ctx.plugin({ apply(ctx) { ctx.provide('ptcRuntime', { language: 'typescript', programFormat: 'function-body' }) } }).await()
-    f.agent.ctx.tools.presentAs('ptc')
+    await f.enablePtc()
     const sdk = (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'tools:sdk').text
     assert.ok(sdk.includes('mcp__bosun__echo'))
   }
 })
 
-test('unsupported host PTC presentation API retains the SDK with an explicit status', async t => {
+test('unsupported legacy PTC presentation API retains the SDK with an explicit status', { skip: scopedExecutors }, async t => {
   const f = await setup(t)
   f.registerTool()
   await f.fiber.dispose()
@@ -351,6 +429,17 @@ test('unsupported host PTC presentation API retains the SDK with an explicit sta
   const sdk = (await f.ctx.systemPrompt.assemble({ scope: f.agent })).sections.find(x => x.name === 'tools:sdk').text
   assert.ok(sdk.includes('mcp__bosun__echo'))
   assert.match(text(await f.invoke({ action: 'status' }, { parent: {} })), /host presentation API unsupported/)
+})
+
+test('inventory reports unknown presentation when a scoped host has no executor', { skip: !scopedExecutors }, async t => {
+  const logDir = await mkdtemp(join(tmpdir(), 'gateway-unknown-executor-fixture-'))
+  const ctx = new Context()
+  t.after(async () => { await ctx.fiber.dispose(); await rm(logDir, { recursive: true, force: true }) })
+  for (const service of [SystemPrompt, ToolRuntime, SkillRegistry]) await ctx.plugin(service, {}).await()
+  await ctx.plugin(gateway, { mcpServers: ['bosun'], wrapSkills: false, localAliases: false, logDir }).await()
+  const { inventory } = await ctx.capabilityGateway.snapshot()
+  assert.equal(inventory.mode, 'unknown')
+  assert.equal(inventory.mcp[0].presentation, 'unknown')
 })
 
 test('YAML invocation comments, quoted values and invalid policies follow native semantics', async t => {
@@ -406,7 +495,7 @@ test('inventory includes wrapped and native services, per-scope skills and unkno
   const snapshot = await f.ctx.get('capabilityGateway').snapshot()
   assert.equal(snapshot.inventory.agentId, 'fixture-agent')
   assert.equal(snapshot.inventory.skills.find(x => x.name === 'diagnostic').managed, true)
-  assert.equal(snapshot.inventory.mcp.find(x => x.name === 'bosun').presentation, 'gateway')
+  assert.equal(snapshot.inventory.mcp.find(x => x.name === 'bosun').presentation, scopedExecutors ? 'native' : 'gateway')
   assert.equal(snapshot.inventory.mcp.find(x => x.name === 'other').managed, false)
   assert.equal(snapshot.inventory.mcp.find(x => x.name === 'missing').state, 'no_tools_observed')
   assert.equal(snapshot.activity.stats.callSuccessRate, null)
@@ -429,7 +518,7 @@ test('search → call correlation, manual feedback and direct calls are separate
   const searchResult = await f.invoke({ action: 'search', query: privateQuery })
   assert.ok(!searchResult.isError, text(searchResult))
   await f.invoke({ action: 'call', name: 'mcp__bosun__echo', arguments: { value: 'secret body' } })
-  await f.ctx.tools.execute({ callId: 'direct-call', name: 'mcp__bosun__echo', arguments: {}, agent: f.agent, signal: new AbortController().signal })
+  await executeFixture(f.ctx, { callId: 'direct-call', name: 'mcp__bosun__echo', arguments: {}, agent: f.agent, signal: new AbortController().signal })
   const service = f.ctx.get('capabilityGateway')
   let snapshot = await service.snapshot()
   assert.equal(snapshot.activity.stats.calls, 1)

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 — 2026-11-09
+
+- Allow DSH 0.2 releases and prereleases starting at `0.2.1-rc.5`. Select the host API at runtime and preserve the caller's step admission and guards on scoped executors.
+- Keep managed MCP declarations out of the PTC SDK when the host renderer is available. DSH `0.2.2-rc.1` retains native tool declarations in native mode. Inventory and status show the effective presentation.
+
 ## 0.6.0 — 2026-11-03
 
 - Declare DSH `0.2.1-rc.5` as the verified host version.

@@ -21,6 +21,7 @@ async function setup(t) {
   const client = new browser.Context()
   t.after(async () => { await client.fiber.dispose(); await host.fiber.dispose(); await rm(logDir, { recursive: true, force: true }) })
   for (const service of [hostRuntime.SystemPrompt, hostRuntime.ToolRuntime, hostRuntime.SkillRegistry, hostRuntime.TypertRegistry]) await host.plugin(service, {}).await()
+  if (hostRuntime.NativeExecutor) await host.plugin(hostRuntime.NativeExecutor).await()
   await host.plugin({ apply(ctx) { ctx.provide('remoteAccess', { decide: () => ({ kind: 'deny', reason: 'policy' }) }) } }).await()
   await host.plugin(hostRuntime.TypertGateway, {}).await()
   await host.plugin(gateway, { wrapSkills: false, wrapMcp: false, logDir, localAliases: false }).await()

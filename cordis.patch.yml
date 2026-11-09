@@ -16,8 +16,8 @@
 # - skillRoots: directories whose skills leave the native catalog and are served
 #   by the gateway. Only these roots are managed; DSH bundled skills, project
 #   skills, and ~/.dsh/skills keep their native surface.
-# - mcpServers: MCP server names whose mcp__<server>__* tools are hidden from
-#   agents and proxied through the gateway.
+# - mcpServers: MCP server names whose mcp__<server>__* tools the gateway serves.
+#   Catalog trimming depends on the host version and tool mode.
 # - mcpKeywords / skillKeywords: optional name -> keyword-array mappings. They
 #   only make existing capabilities findable (aliases), never expand the managed
 #   scope. Default empty: the gateway cannot know your vocabulary.

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Capability Gateway",
-    "description": "Puts selected third-party skills and MCP servers behind one on-demand entry: search, load, and call without repeated catalog exposure."
+    "description": "Search, load, and call selected third-party skills and MCP tools through one gateway. Catalog trimming depends on the host and tool mode."
   }
 }
