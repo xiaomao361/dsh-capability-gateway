@@ -120,6 +120,18 @@ test('scoped restrictions prevent discovery and calling; no global bypass', asyn
   assert.ok((await f.invoke({ action: 'describe', name: 'mcp__bosun__echo' })).isError)
 })
 
+test('MCP names with trailing underscores remain discoverable and managed', async t => {
+  const f = await setup(t, { mcpServers: ['fixture_'] })
+  const name = 'mcp__fixture___echo'
+  f.registerTool(name)
+  const result = await f.invoke({ action: 'describe', name })
+  assert.ok(!result.isError, text(result))
+  const { inventory } = await f.ctx.capabilityGateway.snapshot()
+  const server = inventory.mcp.find(row => row.name === 'fixture_')
+  assert.equal(server.managed, true)
+  assert.deepEqual(server.tools.map(row => row.name), [name])
+})
+
 test('scoped executor dispatch respects the host step admission', { skip: !scopedExecutors }, async t => {
   const f = await setup(t)
   let admitted = false

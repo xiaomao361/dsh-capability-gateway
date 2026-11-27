@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 — 2026-11-27
+
+- Preserve MCP discovery and inventory grouping for configured server names with underscores at the namespace boundary.
+
 ## 0.7.0 — 2026-11-27
 
 - Guide first-time setup from the capability inventory to scope selection. After saving, refresh the inventory and prefill a search with a newly observed managed capability when one is available.

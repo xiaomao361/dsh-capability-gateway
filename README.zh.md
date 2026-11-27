@@ -24,8 +24,8 @@ DeepSeek Harness 的按需能力网关：把主动接管的第三方技能与 MC
 ```sh
 # 在 DSH profile 目录下
 pnpm add link:/path/to/dsh-capability-gateway
-# 也可从 npm 安装：pnpm add dsh-capability-gateway@0.7.0
-# 或安装本地包：pnpm add /path/to/dsh-capability-gateway-0.7.0.tgz
+# 也可从 npm 安装：pnpm add dsh-capability-gateway@0.7.1
+# 或安装本地包：pnpm add /path/to/dsh-capability-gateway-0.7.1.tgz
 ```
 
 在 `~/.dsh/profiles/<profile>/package.json` 里注册 bundle：

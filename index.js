@@ -85,8 +85,7 @@ export function apply(ctx, rawConfig) {
   let skillCache = { at: 0, skills: [], error: undefined }
   let skillScanInflight = null
   let skillCacheGen = 0
-  const mcpServerSet = new Set(config.mcpServers)
-  const hasDoubleUnderscoreServer = config.mcpServers.some(server => server.includes('__'))
+  const mcpPrefixes = config.mcpServers.map(server => [server, `mcp__${server}__`])
 
   const journal = new EventJournal(config.logDir, { pluginVersion: PLUGIN_VERSION })
   const traces = new WeakMap()
@@ -287,15 +286,10 @@ export function apply(ctx, rawConfig) {
   }
 
   function serverOf(toolName) {
-    if (!mcpServerSet.size || typeof toolName !== 'string' || !toolName.startsWith('mcp__')) return undefined
-    if (!hasDoubleUnderscoreServer) {
-      const end = toolName.indexOf('__', 5)
-      if (end <= 5) return undefined
-      const server = toolName.slice(5, end)
-      return mcpServerSet.has(server) ? server : undefined
-    }
-    for (const server of config.mcpServers) {
-      if (toolName.startsWith(`mcp__${server}__`)) return server
+    if (typeof toolName !== 'string' || !toolName.startsWith('mcp__')) return undefined
+    // A server name can end in an underscore or contain the separator itself.
+    for (const [server, prefix] of mcpPrefixes) {
+      if (toolName.startsWith(prefix)) return server
     }
     return undefined
   }
@@ -615,10 +609,10 @@ export function apply(ctx, rawConfig) {
     const schemas = kind === 'skill' ? [] : ctx.tools.schemas(exec.agent)
     const groups = new Map([...new Set([...(kind === 'skill' ? [] : config.mcpServers), ...configurations.keys()])].map(server => [server, []]))
     for (const schema of schemas) {
-      const match = /^mcp__(.*?)__/.exec(schema.name)
-      if (!match) continue
-      if (!groups.has(match[1])) groups.set(match[1], [])
-      groups.get(match[1]).push({ name: schema.name, description: bound(schema.description, 240) ?? '' })
+      const server = serverOf(schema.name) ?? /^mcp__(.*?)__/.exec(schema.name)?.[1]
+      if (server === undefined) continue
+      if (!groups.has(server)) groups.set(server, [])
+      groups.get(server).push({ name: schema.name, description: bound(schema.description, 240) ?? '' })
     }
     const registrations = server => [...(configurations.get(server)?.values() ?? [])]
     const { mode, presentation } = toolPresentation(exec.agent)

@@ -24,8 +24,8 @@ Starting with 0.6.1, the gateway accepts DSH 0.2 releases and prereleases from `
 ```sh
 # from your DSH profile directory
 pnpm add link:/path/to/dsh-capability-gateway
-# Or install from npm: pnpm add dsh-capability-gateway@0.7.0
-# Or install a local package: pnpm add /path/to/dsh-capability-gateway-0.7.0.tgz
+# Or install from npm: pnpm add dsh-capability-gateway@0.7.1
+# Or install a local package: pnpm add /path/to/dsh-capability-gateway-0.7.1.tgz
 ```
 
 Register the bundle in `~/.dsh/profiles/<profile>/package.json` so the plugin layer is applied:
