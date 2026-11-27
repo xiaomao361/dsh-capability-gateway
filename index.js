@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { randomUUID } from 'node:crypto'
 import { EventJournal, ACTIONS, errorCode, hasErrorCode } from './observability.js'
-import { registerRemote } from './remote.js'
+import { registerRemote, validateRemoteOptions } from './remote.js'
 import { rankCapabilities, preview, routingEntries, allowsRoutingFallback } from './search.js'
 import { createArgumentValidator } from './validation.js'
 import { buildReport, reportFilename } from './report.js'
@@ -83,6 +83,10 @@ export function apply(ctx, rawConfig) {
   }
   const controls = new Set()
   let skillCache = { at: 0, skills: [], error: undefined }
+  let skillScanInflight = null
+  let skillCacheGen = 0
+  const mcpServerSet = new Set(config.mcpServers)
+  const hasDoubleUnderscoreServer = config.mcpServers.some(server => server.includes('__'))
 
   const journal = new EventJournal(config.logDir, { pluginVersion: PLUGIN_VERSION })
   const traces = new WeakMap()
@@ -161,6 +165,7 @@ export function apply(ctx, rawConfig) {
   async function scanSkills(roots = config.skillRoots) {
     const skills = []
     const seen = new Set()
+    const CONCURRENCY = 8
     for (const root of roots) {
       let entries
       try {
@@ -169,26 +174,39 @@ export function apply(ctx, rawConfig) {
         throw new Error(`dependency_missing: cannot scan skill root ${root} (${message(error)})`)
       }
       entries.sort((a, b) => a.name.localeCompare(b.name))
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue
-        let file
-        let baseDir = root
-        const kind = entry.isSymbolicLink() ? await stat(join(root, entry.name)) : entry
-        if (kind.isDirectory()) {
-          file = join(root, entry.name, 'SKILL.md')
-          baseDir = join(root, entry.name)
-        } else if (kind.isFile() && entry.name.endsWith('.md')) {
-          file = join(root, entry.name)
-        } else {
-          continue
+      const candidates = entries.filter(entry => !entry.name.startsWith('.'))
+      const loaded = new Array(candidates.length)
+      let cursor = 0
+      const worker = async () => {
+        while (cursor < candidates.length) {
+          const index = cursor++
+          const entry = candidates[index]
+          let file
+          let baseDir = root
+          const kind = entry.isSymbolicLink() ? await stat(join(root, entry.name)) : entry
+          if (kind.isDirectory()) {
+            file = join(root, entry.name, 'SKILL.md')
+            baseDir = join(root, entry.name)
+          } else if (kind.isFile() && entry.name.endsWith('.md')) {
+            file = join(root, entry.name)
+          } else {
+            continue
+          }
+          let text
+          try {
+            text = await readFile(file, 'utf8')
+          } catch (error) {
+            if (error.code === 'ENOENT') continue
+            throw new Error(`dependency_missing: cannot read ${file} (${message(error)})`)
+          }
+          const realPath = await realpath(file)
+          loaded[index] = { file, baseDir, realPath, text }
         }
-        let text
-        try {
-          text = await readFile(file, 'utf8')
-        } catch (error) {
-          if (error.code === 'ENOENT') continue
-          throw new Error(`dependency_missing: cannot read ${file} (${message(error)})`)
-        }
+      }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, candidates.length) }, worker))
+      for (const item of loaded) {
+        if (!item) continue
+        const { file, baseDir, realPath, text } = item
         let data
         try { ({ data } = parseFrontmatter(text)) }
         catch (error) { throw new Error(`dependency_missing: invalid skill frontmatter in ${file} (${message(error)})`) }
@@ -217,6 +235,7 @@ export function apply(ctx, rawConfig) {
           userInvocable: policy('user-invocable', true),
           metadata: data.metadata,
           path: file,
+          realPath,
           baseDir,
           root,
         })
@@ -232,17 +251,24 @@ export function apply(ctx, rawConfig) {
       if (skillCache.error) throw skillCache.error
       return skillCache.skills
     }
-    try {
-      const skills = await scanSkills()
-      skillCache = { at: Date.now(), skills, error: undefined }
-      return skills
-    } catch (error) {
-      skillCache = { at: Date.now(), skills: skillCache.skills, error }
-      throw error
+    if (!skillScanInflight) {
+      const gen = skillCacheGen
+      skillScanInflight = scanSkills().then(
+        skills => {
+          skillCache = { at: gen === skillCacheGen ? Date.now() : 0, skills, error: undefined }
+          return skills
+        },
+        error => {
+          skillCache = { at: gen === skillCacheGen ? Date.now() : 0, skills: skillCache.skills, error }
+          throw error
+        },
+      ).finally(() => { skillScanInflight = null })
     }
+    return skillScanInflight
   }
 
   function invalidateSkills() {
+    skillCacheGen++
     skillCache = { at: 0, skills: skillCache.skills, error: skillCache.error }
     for (const control of controls) {
       try {
@@ -257,11 +283,17 @@ export function apply(ctx, rawConfig) {
 
   function wrappedSchemas(exec) {
     if (!config.wrapMcp || config.mcpServers.length === 0) return []
-    const prefixes = config.mcpServers.map((server) => `mcp__${server}__`)
-    return ctx.tools.schemas(exec?.agent, exec?.toolSet).filter((schema) => prefixes.some((prefix) => schema.name.startsWith(prefix)))
+    return ctx.tools.schemas(exec?.agent, exec?.toolSet).filter((schema) => serverOf(schema.name) !== undefined)
   }
 
   function serverOf(toolName) {
+    if (!mcpServerSet.size || typeof toolName !== 'string' || !toolName.startsWith('mcp__')) return undefined
+    if (!hasDoubleUnderscoreServer) {
+      const end = toolName.indexOf('__', 5)
+      if (end <= 5) return undefined
+      const server = toolName.slice(5, end)
+      return mcpServerSet.has(server) ? server : undefined
+    }
     for (const server of config.mcpServers) {
       if (toolName.startsWith(`mcp__${server}__`)) return server
     }
@@ -321,7 +353,7 @@ export function apply(ctx, rawConfig) {
           // A scoped overlay must not hide a protected global winner either.
           // The global view excludes our agent-scoped provider, so this does not recurse.
           const managed = await managedSkills()
-          const paths = new Map(await Promise.all(managed.map(async item => [item.name, await realpath(item.path)])))
+          const paths = new Map(managed.map(item => [item.name, item.realPath]))
           const host = await ctx.skills.snapshot({ cwd: options.cwd, signal: options.signal })
           if (!host.complete) throw new Error('unavailable: global skill discovery is incomplete')
           const protectedNames = new Set(host.skills.filter(item =>
@@ -503,7 +535,7 @@ export function apply(ctx, rawConfig) {
     setTarget(exec, schema.name, 'mcp')
     validateArguments(schema.name, schema.parameters ?? { type: 'object', properties: {} }, args === undefined ? {} : args)
     const input = {
-      callId: `cap-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      callId: `cap-${randomUUID()}`,
       name,
       arguments: args ?? {},
       signal: exec.signal,
@@ -603,6 +635,7 @@ export function apply(ctx, rawConfig) {
           : registrations(name).some(x => x.phase === 'failed') ? 'plugin_failed' : 'no_tools_observed',
         registrations: registrations(name),
         tools, toolCount: tools.length,
+        hasAliasRoute: routingEntries(tools.map(tool => ({ ...tool, kind: 'mcp', server: name }))).length > 0,
         presentation: config.wrapMcp && config.mcpServers.includes(name) ? presentation : 'native',
       })),
     }
@@ -615,34 +648,31 @@ export function apply(ctx, rawConfig) {
   }
   registerRemote(ctx, {
     async snapshot(raw = {}) {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid_arguments: snapshot options must be an object')
-      const options = raw
-      if (options.agentId !== undefined && typeof options.agentId !== 'string') throw new Error('invalid_arguments: invalid agentId')
-      for (const [key, allowed] of Object.entries({ historyScope: ['all', 'selected'], outcome: ['success', 'error', 'cancelled'], action: ['search', 'load', 'describe', 'call'] })) {
-        if (options[key] !== undefined && !allowed.includes(options[key])) throw new Error(`invalid_arguments: invalid ${key}`)
-      }
-      if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 500)) throw new Error('invalid_arguments: limit must be 1–500')
-      if (options.offset !== undefined && (!Number.isInteger(options.offset) || options.offset < 0 || options.offset > 10000)) throw new Error('invalid_arguments: offset must be 0–10000')
-      if (options.anchorId !== undefined && (typeof options.anchorId !== 'string' || !options.anchorId.length || options.anchorId.length > 200)) throw new Error('invalid_arguments: invalid anchorId')
+      const options = validateRemoteOptions('snapshot', raw)
       const agents = liveAgents()
       const agent = options.agentId ? agents.find(x => identity({ agent: x }) === options.agentId) : agents[0]
       if (options.agentId && !agent) throw new Error('not_found: live agent no longer exists; refresh the session list')
       if (options.historyScope === 'selected' && !agent) throw new Error('not_found: no live agent selected; use all-session history')
-      const [catalog, activity] = await Promise.all([
-        inventory({ agent, signal: new AbortController().signal }),
-        journal.snapshot({ agentId: options.historyScope === 'selected' ? identity({ agent }) : undefined,
-          limit: options.limit, offset: options.offset, anchorId: options.anchorId, outcome: ['success', 'error', 'cancelled'].includes(options.outcome) ? options.outcome : undefined,
-          action: ['search', 'load', 'describe', 'call'].includes(options.action) ? options.action : undefined }),
-      ])
-      return { inventory: catalog, activity, management: management.snapshot(catalog),
+      const includeInventory = options.includeInventory !== false
+      const activityPromise = journal.snapshot({
+        agentId: options.historyScope === 'selected' ? identity({ agent }) : undefined,
+        limit: options.limit, offset: options.offset, anchorId: options.anchorId,
+        target: options.target, outcome: options.outcome, action: options.action,
+      })
+      const [catalog, activity] = includeInventory
+        ? await Promise.all([inventory({ agent, signal: new AbortController().signal }), activityPromise])
+        : [null, await activityPromise]
+      return {
+        ...(catalog ? { inventory: catalog, management: management.snapshot(catalog) } : {}),
+        activity,
         agents: agents.map(x => ({ id: identity({ agent: x }), title: agentTitle(x) })).filter(x => x.id),
         config: { wrapSkills: config.wrapSkills, wrapMcp: config.wrapMcp },
       }
     },
     async configure(options) { return management.save(options) },
-    async probe(options) {
-      if (!options || typeof options.query !== 'string' || !options.query.trim() || options.query.length > 1000) throw new Error('invalid_arguments: 请输入 1–1000 字的查询')
-      if (options.kind !== undefined && !['skill', 'mcp'].includes(options.kind)) throw new Error('invalid_arguments: invalid kind')
+    async addAlias(options) { return management.addAlias(options) },
+    async probe(raw) {
+      const options = validateRemoteOptions('probe', raw)
       const agents = liveAgents()
       const agent = options.agentId ? agents.find(x => identity({ agent: x }) === options.agentId) : agents[0]
       if (options.agentId && !agent) throw new Error('not_found: 会话已失效，请刷新后重试')
@@ -657,18 +687,16 @@ export function apply(ctx, rawConfig) {
           reason: selection.fallback ? 'routing' : item.keywordMatch ? 'alias' : item.name.normalize('NFKC').toLowerCase() === options.query.trim().normalize('NFKC').toLowerCase() ? 'exact' : 'lexical' })),
       }
     },
-    async review(options) {
-      if (!options || typeof options.eventId !== 'string') throw new Error('invalid_arguments: eventId is required')
+    async review(raw) {
+      const options = validateRemoteOptions('review', raw)
       return journal.review(options.eventId, options.verdict)
     },
-    async report(options = {}) {
-      if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('invalid_arguments: report options must be an object')
-      const format = options?.format ?? 'markdown'
-      if (!['markdown', 'json'].includes(format)) throw new Error('invalid_arguments: format must be markdown or json')
+    async report(raw = {}) {
+      const options = validateRemoteOptions('report', raw)
+      const format = options.format ?? 'markdown'
       const scope = options.historyScope ?? 'all'
-      if (!['all', 'selected'].includes(scope)) throw new Error('invalid_arguments: invalid report scope')
       if (scope === 'all' && options.agentId !== undefined) throw new Error('invalid_arguments: agentId requires selected report scope')
-      if (scope === 'selected' && (typeof options.agentId !== 'string' || !options.agentId)) throw new Error('invalid_arguments: selected report scope requires agentId')
+      if (scope === 'selected' && !options.agentId) throw new Error('invalid_arguments: selected report scope requires agentId')
       if (scope === 'selected' && !liveAgents().some(agent => identity({ agent }) === options.agentId)) throw new Error('not_found: selected report agent no longer exists; refresh the session list')
       const summary = await journal.summary({ agentId: scope === 'selected' ? options.agentId : undefined })
       const report = buildReport(summary)
@@ -709,10 +737,16 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(() => {
     const watchers = []
+    let watchTimer = null
+    const scheduleInvalidate = () => {
+      if (watchTimer) clearTimeout(watchTimer)
+      watchTimer = setTimeout(() => { watchTimer = null; invalidateSkills() }, 80)
+      watchTimer.unref?.()
+    }
     if (config.wrapSkills) {
       for (const root of config.skillRoots) {
         try {
-          const watcher = watch(root, { persistent: false, recursive: true }, () => invalidateSkills())
+          const watcher = watch(root, { persistent: false, recursive: true }, scheduleInvalidate)
           watcher.on('error', () => {})
           watchers.push(watcher)
         } catch {
@@ -722,6 +756,7 @@ export function apply(ctx, rawConfig) {
     }
 
     return () => {
+      if (watchTimer) { clearTimeout(watchTimer); watchTimer = null }
       for (const watcher of watchers) {
         try {
           watcher.close()

@@ -42,14 +42,27 @@ function words(value) {
   return new Set([...latin, ...chinese, ...phrases].filter(x => x.length > 1 && !stopWords.has(x)))
 }
 
-function matches(term, tokens, text) {
+function tokenSet(value) {
+  const tokens = words(value)
+  const stemmed = new Set()
+  for (const word of tokens) {
+    const base = stem(word)
+    if (base !== word) stemmed.add(base)
+  }
+  return { tokens, stemmed }
+}
+
+function matches(term, field, text) {
+  const { tokens, stemmed } = field
   if (tokens.has(term)) return 1
   if (/\p{Script=Han}/u.test(term)) return text.includes(term) ? 0.8 : 0
   const base = stem(term)
-  if (base !== term && tokens.has(base)) return 0.9
-  for (const word of tokens) if (stem(word) === term) return 0.9
+  if ((base !== term && tokens.has(base)) || stemmed.has(term)) return 0.9
   // Short commands such as ve, rg and ls must be whole words.
-  return term.length >= 3 && [...tokens].some(word => word.startsWith(term)) ? 0.5 : 0
+  if (term.length >= 3) {
+    for (const word of tokens) if (word.startsWith(term)) return 0.5
+  }
+  return 0
 }
 
 export function allowsRoutingFallback(query) {
@@ -71,7 +84,7 @@ export function rankCapabilities(candidates, query) {
     const name = normalize(item.name)
     const detail = normalize(`${item.detail ?? ''} ${item.whenToUse ?? ''}`)
     const keywords = normalize((item.keywords ?? []).join(' '))
-    return { item, name, detail, keywords, nameWords: words(name), detailWords: words(detail), keywordWords: words(keywords) }
+    return { item, name, detail, keywords, nameWords: tokenSet(name), detailWords: tokenSet(detail), keywordWords: tokenSet(keywords) }
   })
   // ICU splits 看门狗复位 into single characters, so the run alone is not
   // searchable. Add the 2–4 character n-grams this catalog actually contains;
@@ -88,8 +101,23 @@ export function rankCapabilities(candidates, query) {
   }
   const terms = [...new Set([...words(text), ...grams])]
   if (!terms.length) return []
-  const hits = (doc, term) => matches(term, doc.nameWords, doc.name) || matches(term, doc.detailWords, doc.detail) || matches(term, doc.keywordWords, doc.keywords)
-  const frequencies = new Map(terms.map(term => [term, documents.filter(doc => hits(doc, term)).length]))
+  // Evaluate each (doc, term) once and reuse the hit tuple for both document
+  // frequency and final scoring.
+  const frequencies = new Map()
+  const docHits = documents.map(() => new Map())
+  for (const term of terms) {
+    let freq = 0
+    for (let i = 0; i < documents.length; i++) {
+      const doc = documents[i]
+      const nameHit = matches(term, doc.nameWords, doc.name)
+      const detailHit = matches(term, doc.detailWords, doc.detail)
+      const keywordHit = matches(term, doc.keywordWords, doc.keywords)
+      if (!nameHit && !detailHit && !keywordHit) continue
+      freq++
+      docHits[i].set(term, [nameHit, detailHit, keywordHit])
+    }
+    frequencies.set(term, freq)
+  }
   // An unknown word no longer vetoes the whole query: "spacing grid layout looks
   // off" must still reach the right skill. Coverage is therefore measured over
   // the terms this catalog actually knows; unknown words only dilute the score.
@@ -113,16 +141,15 @@ export function rankCapabilities(candidates, query) {
     return [term, anchor * (1 + Math.log(1 + documents.length / (frequency + 1)))]
   }))
   const ranked = []
-  for (const doc of documents) {
+  for (let i = 0; i < documents.length; i++) {
+    const doc = documents[i]
+    const hitMap = docHits[i]
+    if (!hitMap.size) continue
     let score = 0
     let keywordMatch = false
     let anchorHit = !knownLatin.length
     const matched = []
-    for (const term of knownTerms) {
-      const nameHit = matches(term, doc.nameWords, doc.name)
-      const detailHit = matches(term, doc.detailWords, doc.detail)
-      const keywordHit = matches(term, doc.keywordWords, doc.keywords)
-      if (!nameHit && !detailHit && !keywordHit) continue
+    for (const [term, [nameHit, detailHit, keywordHit]] of hitMap) {
       if (keywordHit) { keywordMatch = true; anchorHit = true }
       if (/^[a-z0-9]+$/.test(term)) anchorHit = true
       matched.push(term)

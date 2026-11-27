@@ -35,20 +35,49 @@ export function createManagement(ctx, config, validate) {
       rootChoices: [...roots].sort(),
     }
   }
-  async function save(options) {
+  async function edit(revision, update) {
     const editor = editorOf()
     const entry = entryOf(editor)
     if (!entry || typeof editor.edit !== 'function') throw new Error('unavailable: 宿主未提供此插件的配置保存接口，请通过宿主配置管理接管范围。')
-    if (!options || typeof options.revision !== 'string' || !Array.isArray(options.skillRoots) || !Array.isArray(options.mcpServers)) throw new Error('invalid_arguments: revision、skillRoots 和 mcpServers 必填')
-    // Validate before any mutation and again under the host's edit lock.
-    validate({ skillRoots: options.skillRoots, mcpServers: options.mcpServers, localAliases: false })
     await editor.edit(entry, current => {
-      if (revisionOf(entry, current) !== options.revision) throw new Error('conflict: 配置已变化，请刷新后重新选择。')
+      if (revisionOf(entry, current) !== revision) throw new Error('conflict: 配置已变化，请刷新后重新选择。')
       if (!current || typeof current !== 'object' || Array.isArray(current) || Object.hasOwn(current, '__jsExpr')) throw new Error('unavailable: 表达式配置请通过宿主配置管理修改。')
+      return update(current)
+    })
+  }
+  async function save(options) {
+    if (!options || typeof options.revision !== 'string' || !Array.isArray(options.skillRoots) || !Array.isArray(options.mcpServers)) throw new Error('invalid_arguments: revision、skillRoots 和 mcpServers 必填')
+    validate({ skillRoots: options.skillRoots, mcpServers: options.mcpServers, localAliases: false })
+    await edit(options.revision, current => {
       const normalized = validate({ ...current, skillRoots: options.skillRoots, mcpServers: options.mcpServers })
       return { ...current, skillRoots: [...new Set(normalized.skillRoots)], mcpServers: [...new Set(normalized.mcpServers)] }
     })
     return { saved: true, reload: 'host', message: '已保存并由宿主应用配置，请刷新确认接管结果。' }
   }
-  return { snapshot, save }
+  async function addAlias(options) {
+    const { revision, kind, name, word } = options ?? {}
+    const trimmed = typeof word === 'string' ? word.trim() : ''
+    if (typeof revision !== 'string' || !['skill', 'mcp'].includes(kind) ||
+        typeof name !== 'string' || !(kind === 'skill' ? /^[A-Za-z0-9_.-]{1,80}$/ : /^[A-Za-z0-9_-]{1,32}$/).test(name) ||
+        !trimmed || Array.from(trimmed).length > 80) {
+      throw new Error('invalid_arguments: 请提供能力名称和 1–80 字的别名')
+    }
+    const key = kind === 'skill' ? 'skillKeywords' : 'mcpKeywords'
+    await edit(revision, current => {
+      const existing = current[key]
+      if (existing !== undefined && (!existing || typeof existing !== 'object' || Array.isArray(existing))) {
+        throw new Error(`invalid_config: ${key} 必须是名称到关键词数组的映射`)
+      }
+      const aliases = existing ?? {}
+      const words = Object.hasOwn(aliases, name) ? aliases[name] : []
+      if (!Array.isArray(words)) {
+        throw new Error(`invalid_config: ${key}.${name} 必须是关键词数组`)
+      }
+      const next = { ...current, [key]: { ...aliases, [name]: [...new Set([...words, trimmed])] } }
+      validate(next)
+      return next
+    })
+    return { saved: true }
+  }
+  return { snapshot, save, addAlias }
 }

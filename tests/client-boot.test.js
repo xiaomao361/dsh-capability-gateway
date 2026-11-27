@@ -93,6 +93,10 @@ test('native Client plugin activates, registers its tab, calls Host and fully un
     assert.equal(snapshot.activity.offset, 0)
     assert.equal(snapshot.activity.limit, 10)
     assert.equal(snapshot.activity.anchorId, null)
+    const activityOnly = await api.snapshot({ historyScope: 'all', limit: 10, offset: 0, includeInventory: false })
+    assert.equal(activityOnly.inventory, undefined)
+    assert.equal(activityOnly.management, undefined)
+    assert.equal(activityOnly.activity.limit, 10)
     assert.equal(f.calls.at(-1).endpoint, 'capabilityGateway/snapshot')
     const before = f.calls.length
     await assert.rejects(api.snapshot({ outcome: 'invalid' }), /invalid|Invalid|expected/)

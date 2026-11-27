@@ -60,32 +60,61 @@ export function projectEvent(input) {
 // Shared by the settings snapshot, the model-facing history/stats actions, and
 // the exported weekly report so all three report the same denominators.
 export function computeStats(operations) {
-  const routes = operations.filter(x => x.route === 'gateway' && ['call', 'load'].includes(x.action))
-  const calls = operations.filter(x => x.route === 'gateway' && x.action === 'call')
-  // Only a call that reached the upstream tool can say anything about MCP
-  // reliability; argument validation and availability errors stop earlier.
-  const dispatchedCalls = calls.filter(x => x.dispatched)
-  const searches = operations.filter(x => x.route === 'gateway' && x.action === 'search')
-  const correlated = routes.filter(x => x.searchId !== null && x.candidateRank !== null)
-  const durations = calls.map(x => x.durationMs).filter(x => x !== null).sort((a, b) => a - b)
+  let calls = 0, callDispatched = 0, callSuccesses = 0, callErrors = 0, callCancelled = 0, dispatchedSuccesses = 0
+  let searchCount = 0, searchIncomplete = 0, searchMisses = 0, searchFallbacks = 0
+  let correlatedSelections = 0, insideCandidates = 0, explicitOrUnlinked = 0
+  let routeMismatches = 0, directCalls = 0, reviewedCorrect = 0, reviewedWrong = 0
+  const durations = []
+  for (const row of operations) {
+    if (row.route === 'direct') {
+      directCalls++
+      continue
+    }
+    if (row.action === 'search') {
+      searchCount++
+      if (row.discoveryIncomplete) searchIncomplete++
+      else {
+        if (row.errorCode === 'not_found' || row.matchCount === 0) searchMisses++
+        // A miss that still showed routing entries: the capability was not found,
+        // only a way to keep looking was offered.
+        if (row.matchCount === 0 && row.candidates.length > 0) searchFallbacks++
+      }
+      continue
+    }
+    if (row.action === 'call' || row.action === 'load') {
+      if (row.searchId !== null && row.candidateRank !== null) {
+        correlatedSelections++
+        if (row.candidateRank > 0) insideCandidates++
+      }
+      if (!row.searchId) explicitOrUnlinked++
+      if (row.verdict === 'correct') reviewedCorrect++
+      else if (row.verdict === 'wrong') reviewedWrong++
+    }
+    if (row.action === 'call') {
+      calls++
+      if (row.outcome === 'success') callSuccesses++
+      else if (row.outcome === 'error') callErrors++
+      else if (row.outcome === 'cancelled') callCancelled++
+      // Only a call that reached the upstream tool can say anything about MCP
+      // reliability; argument validation and availability errors stop earlier.
+      if (row.dispatched) {
+        callDispatched++
+        if (row.outcome === 'success') dispatchedSuccesses++
+      }
+      if (row.routeMatches === false) routeMismatches++
+      if (row.durationMs !== null) durations.push(row.durationMs)
+    }
+  }
+  durations.sort((a, b) => a - b)
   return {
     operations: operations.length,
-    calls: calls.length, callDispatched: dispatchedCalls.length, callRejected: calls.length - dispatchedCalls.length,
-    callSuccesses: calls.filter(x => x.outcome === 'success').length,
-    callErrors: calls.filter(x => x.outcome === 'error').length, callCancelled: calls.filter(x => x.outcome === 'cancelled').length,
-    callSuccessRate: dispatchedCalls.length ? dispatchedCalls.filter(x => x.outcome === 'success').length / dispatchedCalls.length : null,
-    searchCount: searches.length, searchIncomplete: searches.filter(x => x.discoveryIncomplete).length,
-    searchMisses: searches.filter(x => !x.discoveryIncomplete && (x.errorCode === 'not_found' || x.matchCount === 0)).length,
-    // A miss that still showed routing entries: the capability was not found,
-    // only a way to keep looking was offered.
-    searchFallbacks: searches.filter(x => !x.discoveryIncomplete && x.matchCount === 0 && x.candidates.length > 0).length,
-    correlatedSelections: correlated.length, insideCandidates: correlated.filter(x => x.candidateRank > 0).length,
-    candidateAdoptionRate: correlated.length ? correlated.filter(x => x.candidateRank > 0).length / correlated.length : null,
-    explicitOrUnlinked: routes.filter(x => !x.searchId).length,
-    routeMismatches: calls.filter(x => x.routeMatches === false).length,
-    directCalls: operations.filter(x => x.route === 'direct').length,
-    reviewedCorrect: routes.filter(x => x.verdict === 'correct').length,
-    reviewedWrong: routes.filter(x => x.verdict === 'wrong').length,
+    calls, callDispatched, callRejected: calls - callDispatched,
+    callSuccesses, callErrors, callCancelled,
+    callSuccessRate: callDispatched ? dispatchedSuccesses / callDispatched : null,
+    searchCount, searchIncomplete, searchMisses, searchFallbacks,
+    correlatedSelections, insideCandidates,
+    candidateAdoptionRate: correlatedSelections ? insideCandidates / correlatedSelections : null,
+    explicitOrUnlinked, routeMismatches, directCalls, reviewedCorrect, reviewedWrong,
     p95Ms: durations.length ? durations[Math.ceil(durations.length * 0.95) - 1] : null,
   }
 }
@@ -110,12 +139,17 @@ export class EventJournal {
     this.readError = null
     this.writeError = null
     this.writeFailures = 0
+    this.dirEnsured = false
     this.queue = Promise.resolve()
     this.ready = this.load()
   }
   trim() {
     const start = this.now() - WINDOW_MS
-    this.rows = this.rows.filter(row => row.at >= start)
+    let expired = false
+    for (let i = 0; i < this.rows.length; i++) {
+      if (this.rows[i].at < start) { expired = true; break }
+    }
+    if (expired) this.rows = this.rows.filter(row => row.at >= start)
     if (this.rows.length > MAX_EVENTS) { this.rows = this.rows.slice(-MAX_EVENTS); this.truncated = true }
   }
   async load() {
@@ -129,7 +163,11 @@ export class EventJournal {
           const buffer = Buffer.alloc(size - from)
           await file.read(buffer, 0, buffer.length, from)
           let text = buffer.toString('utf8')
-          if (from) { text = text.slice(text.indexOf('\n') + 1); this.truncated = true }
+          if (from) {
+            const nl = text.indexOf('\n')
+            text = nl >= 0 ? text.slice(nl + 1) : ''
+            this.truncated = true
+          }
           for (const line of text.split('\n')) {
             if (!line.trim()) continue
             try {
@@ -160,14 +198,17 @@ export class EventJournal {
       this.rows.push(row)
       this.trim()
       try {
-        await mkdir(this.directory, { recursive: true, mode: 0o700 })
+        if (!this.dirEnsured) {
+          await mkdir(this.directory, { recursive: true, mode: 0o700 })
+          this.dirEnsured = true
+        }
         await appendFile(join(this.directory, `${new Date(row.at).toISOString().slice(0, 10)}.jsonl`), `${JSON.stringify(row)}\n`, { mode: 0o600 })
         this.writeError = null
-      } catch (error) { this.writeError = error.code ?? 'write_failed'; this.writeFailures++ }
+      } catch (error) { this.dirEnsured = false; this.writeError = error.code ?? 'write_failed'; this.writeFailures++ }
     })
     return row.id
   }
-  async snapshot({ agentId, limit = 100, offset = 0, anchorId, outcome, action } = {}) {
+  async snapshot({ agentId, limit = 100, offset = 0, anchorId, outcome, action, target } = {}) {
     await this.flush()
     this.trim()
     const selected = this.rows.filter(row => row.type === 'operation' && (!agentId || row.agentId === agentId))
@@ -178,7 +219,13 @@ export class EventJournal {
     // Summary statistics intentionally continue to use the complete selected scope.
     const anchorIndex = anchorId === undefined ? operations.length - 1 : operations.findIndex(x => x.id === anchorId)
     if (anchorId !== undefined && anchorIndex < 0) throw new Error('not_found: history anchor expired; refresh records')
-    const filtered = operations.slice(0, anchorIndex + 1).filter(x => (!outcome || x.outcome === outcome) && (!action || x.action === action)).reverse()
+    const matchesTarget = (kind, name) => target.kind === 'server'
+      ? kind === 'mcp' && name?.startsWith(`mcp__${target.name}__`)
+      : target.kind === kind && name === target.name
+    const filtered = operations.slice(0, anchorIndex + 1).filter(row =>
+      (!outcome || row.outcome === outcome) && (!action || row.action === action) &&
+      (!target || matchesTarget(row.kind, row.target) || matchesTarget(row.kind, row.actualTarget) ||
+        row.candidates.some(candidate => matchesTarget(candidate.kind, candidate.name)))).reverse()
     const pageLimit = Math.max(1, Math.min(500, Number(limit) || 100))
     const pageOffset = Math.min(Math.max(0, Math.trunc(Number(offset) || 0)), Math.max(0, Math.ceil(filtered.length / pageLimit) - 1) * pageLimit)
     return {

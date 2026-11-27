@@ -9,6 +9,8 @@ const snapshotOptions = () => z.strictObject({
   limit: z.number().int().min(1).max(500).optional(),
   offset: z.number().int().min(0).max(10000).optional(),
   anchorId: z.string().min(1).max(200).optional(),
+  target: z.strictObject({ kind: z.enum(['skill', 'mcp', 'server']), name: z.string().regex(/^[A-Za-z0-9_.:/@-]{1,220}$/) }).optional(),
+  includeInventory: z.boolean().optional(),
 })
 const reviewOptions = () => z.strictObject({ eventId: z.string().min(1), verdict: z.enum(['correct', 'wrong', 'unreviewed']) })
 // Reports accept only the displayed session scope and format, never user text.
@@ -17,9 +19,23 @@ const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']
 const configureOptions = () => z.strictObject({ revision: z.string().min(1).max(100),
   skillRoots: z.array(z.string().trim().min(1).max(4096)).max(200),
   mcpServers: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,32}$/)).max(500) })
+const aliasOptions = () => z.strictObject({ revision: z.string().min(1).max(100),
+  kind: z.enum(['skill', 'mcp']), name: z.string().min(1).max(80),
+  word: z.string().trim().min(1).max(160).refine(word => Array.from(word).length <= 80, 'Alias must contain at most 80 Unicode characters') })
 const probeOptions = () => z.strictObject({ query: z.string().trim().min(1).max(1000),
   kind: z.enum(['skill', 'mcp']).optional(), agentId: z.string().min(1).max(200).optional() })
-const options = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions, configure: configureOptions, probe: probeOptions }
+const options = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions, configure: configureOptions, addAlias: aliasOptions, probe: probeOptions }
+const schemas = Object.fromEntries(Object.entries(options).map(([method, create]) => [method, create()]))
+export function validateRemoteOptions(method, raw) {
+  const input = raw === undefined && ['snapshot', 'report'].includes(method) ? {} : raw
+  const parsed = schemas[method].safeParse(input)
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]
+    const path = issue?.path?.length ? `${issue.path.join('.')}: ` : ''
+    throw new Error(`invalid_arguments: ${path}${issue?.message ?? 'invalid options'}`)
+  }
+  return parsed.data
+}
 export const descriptors = Object.keys(options).map(method => {
   const codec = { mode: 'strict', typeSymbol: `${PACKAGE}#${method}Options`, create: options[method] }
   return {

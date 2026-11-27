@@ -24,8 +24,8 @@ Starting with 0.6.1, the gateway accepts DSH 0.2 releases and prereleases from `
 ```sh
 # from your DSH profile directory
 pnpm add link:/path/to/dsh-capability-gateway
-# Or install a local package: pnpm add /path/to/dsh-capability-gateway-0.6.1.tgz
-# For npm, choose a published version that supports your DSH version.
+# Or install from npm: pnpm add dsh-capability-gateway@0.7.0
+# Or install a local package: pnpm add /path/to/dsh-capability-gateway-0.7.0.tgz
 ```
 
 Register the bundle in `~/.dsh/profiles/<profile>/package.json` so the plugin layer is applied:
@@ -95,8 +95,9 @@ Missing or broken packs do not block startup; valid packs and entries remain usa
 
 The panel separates inventory, configuration, usage statistics and runtime records. Configure scope and try searches in Configuration, export reports from Usage statistics, and inspect individual events in Runtime records.
 
-- **Scope selection** lists observable MCP services and suggested skill directories, while retaining configured entries that are currently unavailable. Suggested directories are inferred from visible file paths; verify them or enter a different local directory. Managing a directory includes skills added there later. New services/directories are never selected automatically. Saving changes only `skillRoots` and `mcpServers`, preserving all other configuration and the existing wrapping switches.
-- **Search lab** uses the viewed session and the same managed-catalog ranking as model searches. It displays exact-name, alias, lexical or routing-entry reasons and ranking scores, which are not confidence values. It never executes MCP tools, journals queries or affects usage statistics. Refresh or change sessions to start a new trial.
+- **Scope selection** starts from the inventory or Configuration. Review suggested skill directories and observable MCP services before saving. Configured entries remain visible when unavailable, and managing a directory includes skills added there later. Saving updates `skillRoots` and `mcpServers` and preserves the other settings. If a newly managed capability appears in the refreshed inventory, the Search lab opens with its name ready to try.
+- **Search lab** uses the viewed session and the same managed-catalog ranking as model searches. It displays the match reason and ranking score. Search trials leave tools and usage records untouched. If a query has no direct match, you can explicitly save it as a local alias for a managed skill or an eligible MCP service, then retry it. MCP service aliases help find that service's discovery entry. Alias saves require the host configuration editor.
+- **Runtime records** can be opened from a skill, MCP service or tool in the inventory. The filter includes recorded targets and search candidates. Paging, filtering and review refresh activity while retaining the loaded inventory. The panel's Refresh button also reloads the inventory.
 - **Effects and diagnostics** shows expected MCP declaration counts for the current inventory and presentation mode. Skills are counted separately; no token or cost savings are inferred. Call diagnostics use all retained events in the selected history scope, independent of list filters and pagination. Direct calls are observations, not automatic defects.
 
 Concurrent configuration edits are rejected. Refresh and reload the selection before editing again. If saving disconnects or fails, confirm the effective scope before retrying. Page-based scope saving requires the host's configuration editor for this plugin entry.
@@ -116,9 +117,9 @@ Concurrent configuration edits are rejected. Refresh and reload the selection be
 
 Search is deliberately conservative. Unmatched queries return `not_found` with a pointer to the native path rather than a fake match, and the gateway never calls an upstream tool on its own.
 
-## Privacy
+Reports follow the all-session or selected-session record scope and label it explicitly. An expired selection returns an error. Model `action=report` uses the calling session. Exact-name search remains scoped. Partial Skill/MCP discovery is marked in text and structured metadata and excluded from miss counts.
 
-Unreleased reports follow the settings page's all-session or selected-session record scope and label it explicitly. An expired selection fails instead of widening the report. Model `action=report` uses the calling session. Exact-name search remains scoped; partial Skill/MCP discovery is marked in text and structured metadata rather than counted as a miss.
+## Privacy
 
 Recorded per event: action, target name, route, outcome, error code, duration, candidate names and ranks, plugin version. Not recorded: query text, tool arguments, results, error bodies, credentials, file paths.
 

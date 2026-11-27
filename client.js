@@ -4,7 +4,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { z } = require('zod')
     const h = React.createElement
-    const { useState, useEffect, useCallback, useRef } = React
+    const { useState, useEffect, useCallback, useRef, useMemo } = React
     const labels = {
       managed: '网关管理', native: '原生保留', native_override: '同名能力由原生提供', not_in_scope: '本会话未纳入', unknown: '待确认',
       disabled: '配置已停用', plugin_failed: '插件启动失败', tools_registered: '已发现工具', no_tools_observed: '未观察到工具', gateway: '原生目录已精简', 'gateway-sdk': 'PTC SDK 声明已精简', 'native-sdk': 'PTC SDK 原生暴露',
@@ -85,23 +85,33 @@ window.__ModuleLoader__.load({
         count ? h('div', { className: 'cg-inventory-list' }, h('ul', { className: 'cg-capabilities' }, visible)) : h('p', { className: 'cg-inventory-empty' }, query ? '没有符合条件的能力，可清除筛选查看全部。' : '此范围尚未发现可列出的能力。'),
         count > 10 && h(Pagination, { title, total: count, offset: effective, limit, onPage: setOffset, onSize: size => { setLimit(size); setOffset(0) } }))
     }
-    function ToolList({ tools, name }) {
+    function ToolList({ tools, name, onLogs }) {
       const [offset, setOffset] = useState(0)
       const effective = Math.min(offset, Math.max(0, Math.ceil(tools.length / 10) - 1) * 10)
-      return h('div', null, h('ul', { className: 'cg-tool-list', 'aria-label': `${name} 的工具` }, tools.slice(effective, effective + 10).map(tool => h('li', { key: tool.name }, h('code', null, tool.name), h('p', null, tool.description)))),
+      return h('div', null, h('ul', { className: 'cg-tool-list', 'aria-label': `${name} 的工具` }, tools.slice(effective, effective + 10).map(tool => h('li', { key: tool.name }, h('code', null, tool.name), h('p', null, tool.description), onLogs && h('button', { type: 'button', onClick: () => onLogs({ kind: 'mcp', name: tool.name }) }, '查看工具日志')))),
         tools.length > 10 && h(Pagination, { title: `${name}工具`, total: tools.length, offset: effective, limit: 10, onPage: setOffset }))
     }
-    function Inventory({ inventory, query, kind = '', management = '' }) {
-      const match = row => `${row.name} ${row.description ?? ''} ${row.source ?? ''}`.toLowerCase().includes(query.toLowerCase())
-      const managedMatch = row => !management || (management === 'managed' ? row.managed : !row.managed)
-      const skills = inventory.skills.filter(row => match(row) && managedMatch(row))
-      const servers = inventory.mcp.filter(x => managedMatch(x) && (match(x) || x.tools.some(match)))
+    function Inventory({ inventory, query, kind = '', management = '', onLogs }) {
+      const lowered = query.toLowerCase()
+      const match = row => `${row.name} ${row.description ?? ''} ${row.source ?? ''}`.toLowerCase().includes(lowered)
+      const { skills, servers, rootError, failedMcp, unobservedMcp } = useMemo(() => {
+        const managedMatch = row => !management || (management === 'managed' ? row.managed : !row.managed)
+        const skills = inventory.skills.filter(row => match(row) && managedMatch(row))
+        const servers = inventory.mcp.filter(x => managedMatch(x) && (match(x) || x.tools.some(match)))
+        const rootError = inventory.skillRoots.some(root => root.state === 'error')
+        let failedMcp = 0, unobservedMcp = 0
+        for (const server of inventory.mcp) {
+          if (server.state === 'plugin_failed') failedMcp++
+          else if (server.state === 'no_tools_observed') unobservedMcp++
+        }
+        return { skills, servers, rootError, failedMcp, unobservedMcp }
+      }, [inventory, lowered, management])
       const filterKey = `${query}:${kind}:${management}`
       return h(React.Fragment, null,
         !inventory.nativeSkillsComplete && h('p', { className: 'cg-notice cg-error', role: 'status' }, '技能发现未完成。清单可能缺项，当前状态不能视为完整接入结果。'),
-        inventory.skillRoots.some(root => root.state === 'error') && h('p', { className: 'cg-notice cg-error', role: 'status' }, '部分受管技能目录读取失败，到“配置”查看目录的发现状态。'),
+        rootError && h('p', { className: 'cg-notice cg-error', role: 'status' }, '部分受管技能目录读取失败，到“配置”查看目录的发现状态。'),
         inventory.scope === 'host-only' && h('p', { className: 'cg-notice' }, '当前没有活动会话，显示宿主范围；尚不能确认会话预设提供的能力。'),
-        inventory.mcp.some(server => ['plugin_failed', 'no_tools_observed'].includes(server.state)) && h('p', { className: 'cg-notice', role: 'status' }, `MCP 观察：${inventory.mcp.filter(server => server.state === 'plugin_failed').length} 个启动失败，${inventory.mcp.filter(server => server.state === 'no_tools_observed').length} 个未观察到工具。可按名称筛选定位；未观察到工具不等于离线。`),
+        (failedMcp > 0 || unobservedMcp > 0) && h('p', { className: 'cg-notice', role: 'status' }, `MCP 观察：${failedMcp} 个启动失败，${unobservedMcp} 个未观察到工具。可按名称筛选定位；未观察到工具不等于离线。`),
         inventory.mcpConfigurationObserved === false && h('p', { className: 'cg-muted' }, '当前未取得加载器配置，MCP 清单由受管配置与会话已注册工具组成；其他尚未加载的服务可能未列出。'),
         kind !== 'skill' && h(InventorySection, { key: `mcp:${filterKey}`, title: 'MCP 服务', count: servers.length, total: inventory.mcp.length, query: query || management }, servers.map(server => h('li', { key: server.name },
           h('details', { className: 'cg-capability' },
@@ -114,7 +124,8 @@ window.__ModuleLoader__.load({
               h('p', { className: 'cg-capability-fullname' }, server.name),
               server.state === 'no_tools_observed' && h('p', { className: 'cg-notice' }, '连接、权限或加载情况待确认；不能据此判定离线。'),
               h('dl', null, h('dt', null, '目录展示'), h('dd', null, label(server.presentation)), h('dt', null, '观察状态'), h('dd', null, label(server.state))),
-              h(ToolList, { key: query, name: server.name, tools: server.tools.filter(x => !query || match(x) || match(server)) })))))),
+              onLogs && h('button', { type: 'button', onClick: () => onLogs({ kind: 'server', name: server.name }) }, '查看服务日志'),
+              h(ToolList, { key: query, name: server.name, onLogs, tools: server.tools.filter(x => !query || match(x) || match(server)) })))))),
         kind !== 'mcp' && h(InventorySection, { key: `skill:${filterKey}`, title: 'Skills', count: skills.length, total: inventory.skills.length, query: query || management }, skills.map(skill => h('li', { key: `${skill.name}:${skill.path}` },
           h('details', { className: 'cg-capability' },
             h('summary', null,
@@ -129,18 +140,37 @@ window.__ModuleLoader__.load({
                 h('dt', null, '调用方式'), h('dd', null, skill.managed ? '按需通过网关加载' : skill.modelInvocable === true ? '模型可选' : skill.modelInvocable === false ? '模型不可自动选用' : '待确认'),
                 h('dt', null, '用户调用'), h('dd', null, skill.userInvocable ? '保留用户显式调用' : '未开放用户显式调用'),
                 h('dt', null, '位置'), h('dd', null, h('code', null, skill.path ?? '无文件路径')),
-                h('dt', null, '提供者'), h('dd', null, skill.provider ?? '未纳入当前会话'))))))))
+                h('dt', null, '提供者'), h('dd', null, skill.provider ?? '未纳入当前会话')),
+              onLogs && h('button', { type: 'button', onClick: () => onLogs({ kind: 'skill', name: skill.name }) }, '查看技能日志')))))))
     }
 
-    function Records({ events, onReview, saving = null, filtered = false }) {
+    function recordDiagnosis(row) {
+      if (row.discoveryIncomplete) return '能力发现不完整。请在配置中查看接入异常。'
+      if (row.outcome !== 'error') return null
+      if (row.errorCode === 'invalid_arguments') return '参数校验失败。请先查看工具参数要求，再调整输入。'
+      if (row.errorCode === 'not_found') return '未找到目标。请在能力清单中核对名称和接管状态。'
+      if (row.dispatched) return '工具已收到调用，执行返回异常。请在原会话查看工具返回。'
+      if (row.errorCode === 'dependency_missing') return '依赖不可用。请检查技能文件和所需依赖。'
+      if (row.errorCode === 'unavailable') return '能力暂不可用。请在配置中检查接入状态。'
+      return '请在原会话或宿主日志中查看错误详情。'
+    }
+    function Records({ events, onReview, onDiagnostics, onInventory, saving = null, filtered = false }) {
       if (!events.length) return h('div', { className: 'cg-empty' }, h('strong', null, filtered ? '没有符合筛选条件的记录' : '这个范围还没有调用记录'),
-        h('p', null, filtered ? '调整结果或操作筛选，查看其他记录。' : '通过网关搜索或调用后，刷新即可查看。记录从启用日志功能后开始。'))
-      return h('div', null, events.map(row => h('details', { key: row.id, className: 'cg-record' },
+        h('p', null, filtered ? '调整筛选条件，查看其他记录。' : '通过网关搜索或调用后，刷新即可查看。记录从启用日志功能后开始。'))
+      return h('div', null, events.map(row => {
+        const diagnosis = recordDiagnosis(row)
+        return h('details', { key: row.id, className: 'cg-record' },
         h('summary', null, h(Icon, { name: 'chevron', className: 'cg-chevron' }),
           h('span', { className: 'cg-record-title' }, h('strong', { title: row.target ?? undefined }, row.target ?? (row.action === 'search' ? row.discoveryIncomplete ? `发现不完整 · ${row.candidates.length} 个候选` : row.matchCount === 0 && row.candidates.length ? `无直接匹配 · ${row.candidates.length} 个路由入口` : row.matchCount === null ? '未提供查询词' : `${row.matchCount ?? '未知'} 个匹配` : '未解析目标')), h('small', null, label(row.action), ' · ', row.route === 'gateway' ? '网关' : '原生直接调用')),
           h('span', { className: 'cg-record-result' }, h('span', { className: 'cg-chip', 'data-tone': row.outcome === 'error' ? 'error' : undefined }, h('i', { className: 'cg-dot', 'aria-hidden': true }), label(row.outcome)), ' · ', row.durationMs === null ? '耗时未知' : `${row.durationMs} ms`,
             h('time', { className: 'cg-timestamp', dateTime: new Date(row.at).toISOString() }, time(row.at)))),
-        h('div', { className: 'cg-record-body' }, h('dl', null,
+        h('div', { className: 'cg-record-body' },
+          diagnosis && h('p', { className: 'cg-notice' }, diagnosis),
+          (row.discoveryIncomplete || row.errorCode === 'unavailable') && onDiagnostics &&
+            h('button', { type: 'button', onClick: onDiagnostics }, '查看接入异常'),
+          row.errorCode === 'not_found' && !row.discoveryIncomplete && onInventory &&
+            h('button', { type: 'button', onClick: () => onInventory(row.target ?? '') }, '在能力清单中核对'),
+          h('dl', null,
           h('dt', null, '记录编号'), h('dd', null, h('code', null, row.id)),
           h('dt', null, '会话 / 调用'), h('dd', null, h('code', null, `${row.agentId ?? '宿主'} / ${row.callId ?? '—'}`)),
           h('dt', null, '路径'), h('dd', null, row.route === 'gateway' ? '网关' : '原生直接调用'),
@@ -151,11 +181,13 @@ window.__ModuleLoader__.load({
         row.candidates.length > 0 && h('div', null, '展示给 Agent 的候选：', h('ol', null, row.candidates.map(item => h('li', { key: `${item.kind}:${item.name}` }, `${item.kind} · ${item.name}`)))),
         row.route === 'gateway' && ['load', 'call'].includes(row.action) && h('div', { className: 'cg-review' }, h('label', null, '选用是否合适', h('select', {
           value: row.verdict, disabled: saving !== null, onChange: event => onReview(row.id, event.target.value),
-        }, ['unreviewed', 'correct', 'wrong'].map(value => h('option', { key: value, value }, label(value))))))))))
+        }, ['unreviewed', 'correct', 'wrong'].map(value => h('option', { key: value, value }, label(value))))))))
+      }))
     }
-    function ChoiceList({ title, choices, selected, onChange, disabled }) {
+    function ChoiceList({ title, choices, selected, onChange, disabled, suggestedFilter }) {
       const [filter, setFilter] = useState('')
       const [offset, setOffset] = useState(0)
+      useEffect(() => { if (suggestedFilter !== undefined) { setFilter(suggestedFilter); setOffset(0) } }, [suggestedFilter])
       const matches = choices.filter(value => value.toLowerCase().includes(filter.toLowerCase()))
       const page = Math.min(offset, Math.max(0, Math.ceil(matches.length / 10) - 1) * 10)
       return h('fieldset', { className: 'cg-choices', disabled }, h('legend', null, title),
@@ -165,7 +197,7 @@ window.__ModuleLoader__.load({
           h('label', null, h('input', { type: 'checkbox', checked: selected.includes(value), onChange: e => onChange(e.target.checked ? [...selected, value] : selected.filter(item => item !== value)) }), h('code', null, value))))),
         matches.length > 10 && h(Pagination, { title, total: matches.length, offset: page, limit: 10, busy: disabled, onPage: setOffset }))
     }
-    function ScopeEditor({ management, inventory, config, api, onSaved, disabled }) {
+    function ScopeEditor({ management, inventory, config, api, onSaved, onSample, suggested, disabled }) {
       const [baseline, setBaseline] = useState(management)
       const [roots, setRoots] = useState(management.skillRoots)
       const [servers, setServers] = useState(management.mcpServers)
@@ -187,7 +219,22 @@ window.__ModuleLoader__.load({
           const result = await api.configure({ revision: baseline.revision, skillRoots: roots, mcpServers: servers })
           setMessage(result.message)
           const next = await onSaved()
-          if (next?.management) { setBaseline(next.management); setRoots(next.management.skillRoots); setServers(next.management.mcpServers) }
+          if (next?.management) {
+            setBaseline(next.management); setRoots(next.management.skillRoots); setServers(next.management.mcpServers)
+            if (next.inventory) {
+              const before = inventory
+              const after = next.inventory
+              const addedTool = after.mcp.find(server => server.managed && server.tools.length &&
+                !before.mcp.some(old => old.name === server.name && old.managed))?.tools[0]
+              const addedSkill = after.skills.find(skill => skill.managed &&
+                !before.skills.some(old => old.name === skill.name && old.managed))
+              setMessage(`已刷新清单。当前接管 ${after.mcp.filter(row => row.managed).length} 个 MCP 服务和 ${after.skills.filter(row => row.managed).length} 项技能。`)
+              if (addedTool || addedSkill) onSample?.(addedTool?.name ?? addedSkill.name, after.agentId)
+              else if (changes.some(change => change.added.length)) {
+                setMessage(message => `${message} 本次新增范围暂未发现可试搜的能力，请查看接入状态。`)
+              }
+            }
+          }
         } catch (failure) { setError(`${failure.message ?? failure}。请刷新确认当前配置，再重新载入选择；尚未确认保存成功。`) }
         finally { setBusy(false) }
       }
@@ -200,8 +247,8 @@ window.__ModuleLoader__.load({
         stale && h('p', { className: 'cg-notice', role: 'status' }, '配置已更新。请重新载入选择后继续编辑。'),
         h('form', { onSubmit: save, 'aria-busy': busy },
           h('div', { className: 'cg-editor-grid' },
-            h(ChoiceList, { title: '技能目录', choices: [...new Set([...management.rootChoices, ...roots])].sort(), selected: roots, onChange: setRoots, disabled: locked }),
-            h(ChoiceList, { title: 'MCP 服务', choices: [...new Set([...inventory.mcp.map(row => row.name), ...servers])].sort(), selected: servers, onChange: setServers, disabled: locked })),
+            h(ChoiceList, { title: '技能目录', choices: [...new Set([...management.rootChoices, ...roots])].sort(), selected: roots, onChange: setRoots, disabled: locked, suggestedFilter: suggested?.kind === 'skill' ? suggested.name : undefined }),
+            h(ChoiceList, { title: 'MCP 服务', choices: [...new Set([...inventory.mcp.map(row => row.name), ...servers])].sort(), selected: servers, onChange: setServers, disabled: locked, suggestedFilter: suggested?.kind === 'server' ? suggested.name : undefined })),
           h('div', { className: 'cg-toolbar' }, h('label', { className: 'cg-grow' }, '添加技能目录', h('input', { type: 'text', value: directory, disabled: locked, onChange: e => setDirectory(e.target.value), placeholder: '输入本机目录路径' })),
             h('button', { type: 'button', disabled: locked || !directory.trim(), onClick: () => { setRoots([...new Set([...roots, directory.trim()])]); setDirectory(''); setMessage('') } }, '加入待保存范围')),
           h('div', { className: 'cg-notice', 'aria-label': '接管变更预览' },
@@ -213,18 +260,34 @@ window.__ModuleLoader__.load({
           h('p', { role: 'status', className: 'cg-footnote' }, message),
           error && h('p', { role: 'alert', className: 'cg-notice cg-error' }, error)))
     }
-    function SearchLab({ api, agentId, disabled }) {
+    function SearchLab({ api, agentId, disabled, sample, inventory, management, onSaved, onDiagnostics, onScope }) {
       const [query, setQuery] = useState('')
       const [kind, setKind] = useState('')
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const [result, setResult] = useState(null)
+      const [aliasTarget, setAliasTarget] = useState('')
+      const [aliasBusy, setAliasBusy] = useState(false)
+      const [aliasStatus, setAliasStatus] = useState('')
+      const details = useRef(null)
       const request = useRef(0)
       useEffect(() => () => { request.current++ }, [])
       const clear = () => { request.current++; setResult(null); setError(''); setBusy(false) }
-      const search = async e => {
-        e.preventDefault()
-        if (disabled || busy) return
+      const observedAt = useRef(inventory?.at)
+      useEffect(() => {
+        if (observedAt.current === inventory?.at) return
+        observedAt.current = inventory?.at
+        if (!aliasBusy) clear()
+      }, [inventory?.at, aliasBusy])
+      useEffect(() => {
+        if (!sample) return
+        clear(); setQuery(sample.name); setKind(''); setAliasTarget(''); setAliasStatus('')
+        if (details.current) {
+          details.current.open = true
+          details.current.querySelector('input')?.focus()
+        }
+      }, [sample])
+      const search = async () => {
         const revision = ++request.current
         if (!query.trim()) { setError('请输入任务、能力名称或短关键词。'); return }
         setBusy(true); setError(''); setResult(null)
@@ -234,44 +297,98 @@ window.__ModuleLoader__.load({
         } catch (failure) { if (request.current === revision) setError(String(failure.message ?? failure)) }
         finally { if (request.current === revision) setBusy(false) }
       }
-      return h('details', { className: 'cg-disclosure cg-feature' }, h('summary', null, '搜索试验区'),
+      const word = query.trim()
+      const aliasLengthValid = Array.from(word).length <= 80
+      const queryName = word.normalize('NFKC').toLowerCase()
+      const sameName = row => row.name.normalize('NFKC').toLowerCase() === queryName
+      const nativeServer = kind !== 'skill' && inventory?.mcp.find(row => !row.managed && (sameName(row) || row.tools.some(sameName)))
+      const nativeSkill = kind !== 'mcp' && inventory?.skills.find(row => row.state === 'native' && sameName(row))
+      const scopeTarget = nativeServer ? { kind: 'server', name: nativeServer.name } :
+        nativeSkill && management?.rootChoices.filter(root => nativeSkill.path?.startsWith(root + '/')).sort((a, b) => b.length - a.length)[0]
+      const choices = [
+        ...(kind === 'mcp' ? [] : (inventory?.skills ?? []).filter(row => row.managed && /^[A-Za-z0-9_.-]{1,80}$/.test(row.name)).map(row => ({ kind: 'skill', name: row.name }))),
+        ...(kind === 'skill' ? [] : (inventory?.mcp ?? []).filter(row => row.managed && row.hasAliasRoute).map(row => ({ kind: 'mcp', name: row.name }))),
+      ]
+      const addAlias = async e => {
+        e.preventDefault()
+        const target = choices.find(row => `${row.kind}:${row.name}` === aliasTarget)
+        if (!target || disabled || aliasBusy || busy || !management?.writable || !aliasLengthValid) return
+        setAliasBusy(true); setAliasStatus(''); setError('')
+        try {
+          await api.addAlias({ ...target, word, revision: management.revision })
+          const next = await onSaved()
+          if (!next?.inventory || next.inventory.agentId !== agentId) {
+            setAliasStatus('别名已保存。请刷新并核对会话，再试搜原词。')
+            return
+          }
+          setAliasStatus('别名已保存，正在用原词试搜。')
+          await search()
+          setAliasStatus('别名已保存。')
+        } catch (failure) {
+          setAliasStatus(`未确认别名保存成功（${failure.message ?? failure}）。请刷新后检查配置。`)
+        } finally { setAliasBusy(false) }
+      }
+      return h('details', { ref: details, className: 'cg-disclosure cg-feature' }, h('summary', null, '搜索试验区'),
         h('p', { className: 'cg-footnote' }, '使用当前查看会话的网关检索规则，只搜索已接管能力。不执行下游工具，不写入调用记录。'),
-        h('form', { onSubmit: search, 'aria-busy': busy }, h('div', { className: 'cg-toolbar' },
-          h('label', { className: 'cg-grow' }, '试验查询', h('input', { type: 'text', value: query, maxLength: 1000, 'aria-invalid': Boolean(error), 'aria-describedby': 'cg-probe-error', onChange: e => { clear(); setQuery(e.target.value) }, placeholder: '输入任务、能力名称或短关键词' })),
-          h('label', null, '试验类型', h('select', { value: kind, onChange: e => { clear(); setKind(e.target.value) } }, h('option', { value: '' }, '全部能力'), h('option', { value: 'skill' }, '仅技能'), h('option', { value: 'mcp' }, '仅 MCP'))),
-          h('button', { type: 'submit', disabled: disabled || busy }, busy ? '正在搜索…' : '试验搜索'))),
+        h('form', { onSubmit: e => { e.preventDefault(); if (!disabled && !busy && !aliasBusy) return search() }, 'aria-busy': busy }, h('div', { className: 'cg-toolbar' },
+          h('label', { className: 'cg-grow' }, '试验查询', h('input', { type: 'text', value: query, maxLength: 1000, disabled: aliasBusy, 'aria-invalid': Boolean(error), 'aria-describedby': 'cg-probe-error', onChange: e => { clear(); setQuery(e.target.value); setAliasTarget(''); setAliasStatus('') }, placeholder: '输入任务、能力名称或短关键词' })),
+          h('label', null, '试验类型', h('select', { value: kind, disabled: aliasBusy, onChange: e => { clear(); setKind(e.target.value); setAliasTarget(''); setAliasStatus('') } }, h('option', { value: '' }, '全部能力'), h('option', { value: 'skill' }, '仅技能'), h('option', { value: 'mcp' }, '仅 MCP'))),
+          h('button', { type: 'submit', disabled: disabled || busy || aliasBusy }, busy ? '正在搜索…' : '试验搜索'))),
         h('p', { id: 'cg-probe-error', role: error ? 'alert' : undefined, className: 'cg-error' }, error),
         h('p', { role: 'status', className: 'cg-footnote' }, result ? ({ matched: `匹配 ${result.matchCount} 项，显示前 ${result.results.length} 项。`, not_found: '已接管范围内无匹配。请检查接管范围、别名，或改用名称与短关键词。', routing: '无直接匹配。以下仅是可继续检索的 MCP 入口，尚未确认下游能力。', incomplete: '能力发现不完整，不能据此判断未命中。请先查看接入异常。' })[result.state] : busy ? '正在检索当前接管范围…' : ''),
         result?.scope === 'host-only' && h('p', { className: 'cg-notice' }, '当前没有活动会话，结果仅代表宿主范围。'),
         result?.aliasCoverageComplete === false && h('p', { className: 'cg-notice cg-error' }, '别名覆盖不完整，未命中不代表该能力不存在。请修正上方的别名配置异常后重试。'),
         result?.unavailable?.length > 0 && h('p', { className: 'cg-notice cg-error' }, result.unavailable.map(item => `${item.kind}：${item.code}`).join('；')),
+        h('p', { role: 'status', className: 'cg-footnote' }, aliasStatus),
+        (result?.state === 'incomplete' || result?.aliasCoverageComplete === false) && onDiagnostics &&
+          h('button', { type: 'button', onClick: onDiagnostics }, '查看接入异常'),
+        ['not_found', 'routing'].includes(result?.state) && scopeTarget && onScope &&
+          h('button', { type: 'button', onClick: () => onScope(nativeServer ? scopeTarget : { kind: 'skill', name: scopeTarget }) },
+            `在接管范围中查找 ${nativeServer?.name ?? nativeSkill.name}`),
+        ['not_found', 'routing'].includes(result?.state) && !scopeTarget && management?.writable && aliasLengthValid && choices.length > 0 &&
+          h('form', { onSubmit: addAlias, 'aria-busy': aliasBusy },
+            h('div', { className: 'cg-toolbar' },
+              h('label', null, `将「${word}」添加为别名`, h('select', { value: aliasTarget, disabled: disabled || aliasBusy, onChange: e => setAliasTarget(e.target.value) },
+                h('option', { value: '' }, '选择对应的能力'), choices.map(row => h('option', { key: `${row.kind}:${row.name}`, value: `${row.kind}:${row.name}` }, `${row.kind === 'skill' ? '技能' : 'MCP 服务'} · ${row.name}`)))),
+              h('button', { type: 'submit', disabled: disabled || aliasBusy || busy || !aliasTarget }, '保存别名并试搜')),
+            aliasTarget.startsWith('mcp:') && h('p', { className: 'cg-footnote' }, 'MCP 别名用于发现服务的检索入口。')),
         result?.results.length > 0 && h('ol', { className: 'cg-probe-results' }, result.results.map(row => h('li', { key: `${row.kind}:${row.name}` },
           h('strong', null, row.name), h('span', { className: 'cg-chip' }, row.kind === 'skill' ? '技能' : 'MCP'),
           h('p', null, row.description), h('small', { className: 'cg-muted' }, `${({ exact: '完整名称匹配', alias: '别名匹配', lexical: '名称或说明词法匹配', routing: '继续检索的路由入口' })[row.reason]}${row.score === null ? '' : ` · 排序分 ${Number(row.score).toFixed(1)}（非置信度）`}`)))))
     }
     function Diagnostics({ inventory, activity, onFilter }) {
       const stats = activity.stats
-      const total = inventory.mcp.reduce((sum, row) => sum + row.toolCount, 0)
-      const hidden = inventory.mcp.filter(row => ['gateway', 'gateway-sdk'].includes(row.presentation)).reduce((sum, row) => sum + row.toolCount, 0)
-      const presentationUnknown = inventory.mode === 'unknown'
-      const managedSkills = inventory.skills.filter(row => row.managed).length
-      const issues = []
-      const add = (condition, text, action) => { if (condition) issues.push({ text, action }) }
-      add(!inventory.nativeSkillsComplete, '技能发现不完整。请查看受管目录与宿主的技能加载情况。')
-      add(inventory.skillRoots.some(root => root.state === 'error'), '技能目录读取失败。请到“配置”核对目录路径与权限。')
-      add(inventory.configDiagnostics?.complete === false, '别名配置不完整。请按“配置”中显示的文件序号修正后重载。')
-      add(inventory.mcp.some(row => row.state === 'plugin_failed'), '有 MCP 插件启动失败。请在宿主插件管理中检查启动日志。')
-      add(inventory.mcp.some(row => row.state === 'no_tools_observed'), '部分 MCP 未观察到工具。请检查加载、连接与会话权限；这不等同于离线。')
-      add(inventory.mcpConfigurationObserved === false, 'MCP 配置发现不完整。未加载的服务可能没有列出。')
-      add(inventory.mcp.some(row => row.presentation === 'native-sdk'), '当前宿主未支持 PTC 声明精简。受管 MCP 仍原生暴露，请核对宿主兼容版本。')
-      add(inventory.mcp.some(row => row.managed && row.presentation === 'native'), '原生模式保留受管 MCP 的工具声明，仍可通过网关检索和调用。')
-      add(presentationUnknown, '当前宿主无法确认 MCP 工具声明。')
-      add(!activity.storage.complete, '日志样本不完整，当前统计不能代表全部调用。请检查日志读取与写入状态。')
-      add(stats.searchMisses > 0, `${stats.searchMisses} 次搜索未命中。请用搜索试验区检查名称、范围与别名。`, { action: 'search' })
-      add(stats.searchIncomplete > 0, `${stats.searchIncomplete} 次搜索发现不完整。请先处理接入异常，再评价检索质量。`, { action: 'search' })
-      add(stats.directCalls > 0, `${stats.directCalls} 次受管能力走原生直接调用。可能来自显式调用，请检查记录后判断。`)
-      add(stats.routeMismatches > 0, `${stats.routeMismatches} 次转发目标不一致。请展开调用记录核对。`, { action: 'call' })
-      add(stats.reviewedWrong > 0, `${stats.reviewedWrong} 次选用被标记为需修正。请结合候选与实际目标复核。`)
+      const { total, hidden, presentationUnknown, managedSkills, issues } = useMemo(() => {
+        let total = 0, hidden = 0, hasPluginFailed = false, hasNoTools = false, hasNativeSdk = false, hasManagedNative = false
+        for (const row of inventory.mcp) {
+          total += row.toolCount
+          if (row.presentation === 'gateway' || row.presentation === 'gateway-sdk') hidden += row.toolCount
+          if (row.state === 'plugin_failed') hasPluginFailed = true
+          if (row.state === 'no_tools_observed') hasNoTools = true
+          if (row.presentation === 'native-sdk') hasNativeSdk = true
+          if (row.managed && row.presentation === 'native') hasManagedNative = true
+        }
+        const presentationUnknown = inventory.mode === 'unknown'
+        const managedSkills = inventory.skills.filter(row => row.managed).length
+        const issues = []
+        const add = (condition, text, action) => { if (condition) issues.push({ text, action }) }
+        add(!inventory.nativeSkillsComplete, '技能发现不完整。请查看受管目录与宿主的技能加载情况。')
+        add(inventory.skillRoots.some(root => root.state === 'error'), '技能目录读取失败。请到“配置”核对目录路径与权限。')
+        add(inventory.configDiagnostics?.complete === false, '别名配置不完整。请按“配置”中显示的文件序号修正后重载。')
+        add(hasPluginFailed, '有 MCP 插件启动失败。请在宿主插件管理中检查启动日志。')
+        add(hasNoTools, '部分 MCP 未观察到工具。请检查加载、连接与会话权限；这不等同于离线。')
+        add(inventory.mcpConfigurationObserved === false, 'MCP 配置发现不完整。未加载的服务可能没有列出。')
+        add(hasNativeSdk, '当前宿主未支持 PTC 声明精简。受管 MCP 仍原生暴露，请核对宿主兼容版本。')
+        add(hasManagedNative, '原生模式保留受管 MCP 的工具声明，仍可通过网关检索和调用。')
+        add(presentationUnknown, '当前宿主无法确认 MCP 工具声明。')
+        add(!activity.storage.complete, '日志样本不完整，当前统计不能代表全部调用。请检查日志读取与写入状态。')
+        add(stats.searchMisses > 0, `${stats.searchMisses} 次搜索未命中。请用搜索试验区检查名称、范围与别名。`, { action: 'search' })
+        add(stats.searchIncomplete > 0, `${stats.searchIncomplete} 次搜索发现不完整。请先处理接入异常，再评价检索质量。`, { action: 'search' })
+        add(stats.directCalls > 0, `${stats.directCalls} 次受管能力走原生直接调用。可能来自显式调用，请检查记录后判断。`)
+        add(stats.routeMismatches > 0, `${stats.routeMismatches} 次转发目标不一致。请展开调用记录核对。`, { action: 'call' })
+        add(stats.reviewedWrong > 0, `${stats.reviewedWrong} 次选用被标记为需修正。请结合候选与实际目标复核。`)
+        return { total, hidden, presentationUnknown, managedSkills, issues }
+      }, [inventory, activity, stats])
       return h('section', { className: 'cg-feature cg-panel', 'aria-label': '效果与异常诊断' },
         h('div', { className: 'cg-list-heading' }, h('h3', null, '效果与异常诊断')),
         h('div', { className: 'cg-feature-body' },
@@ -298,22 +415,41 @@ window.__ModuleLoader__.load({
       const [historyScope, setHistoryScope] = useState('all')
       const [outcome, setOutcome] = useState('')
       const [action, setAction] = useState('')
+      const [target, setTarget] = useState(null)
+      const [sample, setSample] = useState(null)
+      const [suggested, setSuggested] = useState(null)
+      const diagnostics = useRef(null)
+      const [showDiagnostics, setShowDiagnostics] = useState(false)
+      const scopeEditor = useRef(null)
       const [pageRequest, setPageRequest] = useState({ offset: 0, limit: 10 })
+      const hasInventory = useRef(Boolean(initialSnapshot?.inventory))
       const revision = useRef(0)
-      const refresh = useCallback(async () => {
+      const refresh = useCallback(async ({ activityOnly } = {}) => {
         const request = ++revision.current
         setBusy(true); setError('')
         try {
-          const next = await api.snapshot({ historyScope, ...pageRequest, ...(agentId ? { agentId } : {}), ...(outcome ? { outcome } : {}), ...(action ? { action } : {}) })
-          if (revision.current === request) { setData(next); return next }
+          const skipInventory = Boolean(activityOnly ?? pageRequest.activityOnly) && hasInventory.current
+          const { activityOnly: _ignored, ...paging } = pageRequest
+          const next = await api.snapshot({
+            historyScope, ...paging,
+            ...(skipInventory ? { includeInventory: false } : {}),
+            ...(agentId ? { agentId } : {}), ...(outcome ? { outcome } : {}),
+            ...(action ? { action } : {}), ...(target ? { target } : {}),
+          })
+          if (revision.current === request) {
+            if (next.inventory) hasInventory.current = true
+            setData(prev => next.inventory ? next : prev ? { ...prev, ...next } : next)
+            return next
+          }
         } catch (failure) { if (revision.current === request) setError(String(failure.message ?? failure)) }
         finally { if (revision.current === request) setBusy(false) }
-      }, [api, agentId, historyScope, outcome, action, pageRequest])
+      }, [api, agentId, historyScope, outcome, action, target, pageRequest])
       useEffect(() => { refresh(); return () => { revision.current++ } }, [refresh])
-      const firstPage = () => setPageRequest(current => ({ offset: 0, limit: current.limit }))
+      const refreshInventory = () => refresh({ activityOnly: false })
+      const firstPage = (activityOnly = false) => setPageRequest(current => ({ offset: 0, limit: current.limit, ...(activityOnly ? { activityOnly: true } : {}) }))
       const review = async (eventId, verdict) => {
         setSaving(eventId); setError('')
-        try { await api.review({ eventId, verdict }); await refresh() }
+        try { await api.review({ eventId, verdict }); await refresh({ activityOnly: true }) }
         catch (failure) { setError(String(failure.message ?? failure)) }
         finally { setSaving(null) }
       }
@@ -343,39 +479,60 @@ window.__ModuleLoader__.load({
         ['logs', '运行日志', '查看网关记录的搜索、技能加载和 MCP 调用明细。'],
       ]
       const [, title, description] = sections.find(([id]) => id === section) ?? sections[0]
-      const openLogs = filters => { setOutcome(''); setAction(filters.action || ''); setSection('logs'); firstPage() }
+      const openLogs = filters => {
+        setOutcome(''); setAction(filters.action || ''); setTarget(filters.target ?? null); setSection('logs'); firstPage(true)
+      }
+      const openScope = value => {
+        setSuggested(value ? { ...value } : null); setSection('config')
+        if (section === 'config') scopeEditor.current?.focus()
+      }
+      const openDiagnostics = () => {
+        setSection('config')
+        setShowDiagnostics(true)
+        if (section === 'config') {
+          const panel = diagnostics.current
+          if (panel) { panel.open = true; panel.firstElementChild?.focus() }
+        }
+      }
       return h('section', { className: 'cg-page', 'aria-label': '能力网关', 'aria-busy': busy },
         h('div', { className: 'cg-header' }, h('div', null, h('div', { className: 'cg-brand' }, h(Icon, { name: 'network' }), h('h2', null, '能力网关')), h('p', null, '管理网关接管范围，查看使用情况。')),
-          h('button', { type: 'button', 'aria-label': '刷新快照', disabled: locked, onClick: firstPage }, h(Icon, { name: 'refresh' }), busy ? '正在刷新…' : '刷新')),
+          h('button', { type: 'button', 'aria-label': '刷新快照', disabled: locked, onClick: () => firstPage(false) }, h(Icon, { name: 'refresh' }), busy ? '正在刷新…' : '刷新')),
 
         error && h('p', { className: 'cg-notice cg-error', role: 'alert' }, `读取或保存失败：${error}。${data ? '下方保留上次读取的快照，可能与当前筛选不同；选择“刷新”重试。' : '请确认插件已启用后重试。'}`),
-        h('div', { className: 'cg-nav', role: 'group', 'aria-label': '查看内容' }, sections.map(([id, title]) => h('button', { key: id, type: 'button', 'aria-pressed': section === id, onClick: () => setSection(id) }, title))),
+        h('div', { className: 'cg-nav', role: 'group', 'aria-label': '查看内容' }, sections.map(([id, title]) => h('button', { key: id, type: 'button', 'aria-pressed': section === id, onClick: () => { setShowDiagnostics(false); setSection(id) } }, title))),
         h('p', { className: 'cg-update', role: 'status' }, busy && data ? '正在更新，以下暂为上次读取的快照…' : saving ? '正在保存标记…' : ''),
         h('div', { className: 'cg-view-heading' }, h('h3', null, title), h('p', null, description)),
-        h('div', { className: 'cg-toolbar cg-scope' }, h('label', null, section === 'config' ? '发现与试搜会话' : '查看会话', h('select', { value: agentId, disabled: locked, onChange: e => { setAgentId(e.target.value); firstPage() } },
+        h('div', { className: 'cg-toolbar cg-scope' }, h('label', null, section === 'config' ? '发现与试搜会话' : '查看会话', h('select', { value: agentId, disabled: locked, onChange: e => { setAgentId(e.target.value); setSample(null); firstPage() } },
           h('option', { value: '' }, '自动选择 / 无会话时查看宿主'), (data?.agents ?? []).map(agent => h('option', { key: agent.id, value: agent.id, title: agent.id }, agent.title ? `${agent.title} · ${shortSession(agent.id)}` : `会话 ${shortSession(agent.id)}`)))),
           inventory && h('span', { className: 'cg-timestamp cg-muted cg-scope-meta' }, `当前：${data.agents?.find(agent => agent.id === inventory.agentId)?.title || (inventory.agentId ? shortSession(inventory.agentId) : '宿主范围')} · 更新于 ${time(inventory.at)}`)),
         !data ? h('p', { role: 'status', className: 'cg-empty' }, busy ? '正在读取网关数据…' : '尚未读取网关数据。') : h(React.Fragment, null,
         h('div', { hidden: section !== 'config' },
-          data.management ? h(ScopeEditor, { management: data.management, inventory, config: data.config, api, onSaved: refresh, disabled: locked || Boolean(error) }) : h('p', { className: 'cg-notice' }, '当前宿主未提供接管范围配置。'),
+          h('div', { ref: scopeEditor, tabIndex: -1 }, data.management ? h(ScopeEditor, { management: data.management, inventory, config: data.config, api, onSaved: refreshInventory, onSample: (name, agentId) => setSample({ name, agentId }), suggested, disabled: locked || Boolean(error) }) : h('p', { className: 'cg-notice' }, '当前宿主未提供接管范围配置。')),
+          h('details', { ref: diagnostics, open: showDiagnostics || undefined, className: 'cg-disclosure' }, h('summary', null, '接入异常与目录状态'),
+          !inventory.nativeSkillsComplete && h('p', { className: 'cg-notice' }, '技能发现未完成。请检查技能提供者，再刷新。'),
+          inventory.mcp.filter(server => ['plugin_failed', 'no_tools_observed'].includes(server.state)).map(server =>
+            h('p', { key: server.name, className: 'cg-notice' }, `${server.name} · ${label(server.state)}。请检查宿主中的 MCP 配置与启动状态。`)),
           section === 'config' && inventory.configDiagnostics?.complete === false && h('div', { className: 'cg-notice cg-error', role: 'status' },
           h('p', null, `别名配置有 ${inventory.configDiagnostics.total} 项异常，搜索覆盖不完整。修正对应配置或文件后，重新加载插件。`),
           h('ul', null, inventory.configDiagnostics.items.map((item, index) => h('li', { key: index },
             `${item.source === 'localAliases' ? '本机别名包' : `keywordPacks 第 ${item.index} 项`}：${({ file_missing: '文件不存在', file_unreadable: '无法读取文件', invalid_json: 'JSON 格式错误', invalid_pack: '应为技能名称到关键词数组的映射', invalid_entries: '包含无效条目' })[item.code] ?? item.code}${item.count ? `（${item.count} 条）` : ''}${item.entries?.length ? `，条目序号：${item.entries.join('、')}${item.count > item.entries.length ? '…' : ''}` : ''}`))),
           inventory.configDiagnostics.truncated && h('p', null, `当前显示 ${inventory.configDiagnostics.shown} 项，共 ${inventory.configDiagnostics.total} 项异常。`)),
-          h('details', { className: 'cg-disclosure' }, h('summary', null, '已配置目录的发现状态'),
-            h('ul', { className: 'cg-roots' }, inventory.skillRoots.map(root => h('li', { key: root.path }, h('code', null, root.path), h('span', { className: root.state === 'error' ? 'cg-error' : undefined }, root.state === 'error' ? `读取失败（${root.errorCode}）` : `${root.count} 项可供网关管理`))))),
-          section === 'config' && h(SearchLab, { key: `${inventory.agentId}:${inventory.at}`, api, agentId: inventory.agentId, disabled: locked || Boolean(error) })),
+          h('div', null, h('p', null, '已配置目录的发现状态'),
+            h('ul', { className: 'cg-roots' }, inventory.skillRoots.map(root => h('li', { key: root.path }, h('code', null, root.path), h('span', { className: root.state === 'error' ? 'cg-error' : undefined }, root.state === 'error' ? `读取失败（${root.errorCode}）` : `${root.count} 项可供网关管理`)))))),
+          section === 'config' && h(SearchLab, { key: inventory.agentId ?? 'host', api, agentId: inventory.agentId, sample: sample?.agentId === inventory.agentId ? sample : null, inventory, management: data.management, onSaved: refreshInventory, onScope: openScope, onDiagnostics: openDiagnostics, disabled: locked || Boolean(error) })),
         section === 'inventory' && h(React.Fragment, null,
           h('div', { className: 'cg-overview', 'aria-label': '接入总览' },
             [['box', '已接管 MCP 服务', inventory.mcp.filter(row => row.managed).length, `清单共 ${inventory.mcp.length} 个服务`], ['layers', '已接管技能', inventory.skills.filter(row => row.managed).length, `清单共 ${inventory.skills.length} 项技能`]].map(([icon, title, count, hint]) => h('dl', { key: title }, h('dt', null, h(Icon, { name: icon }), title), h('dd', null, count), h('small', null, hint)))),
+          data.management && !data.management.skillRoots.length && !data.management.mcpServers.length &&
+            h('div', { className: 'cg-notice' }, h('p', null, '还未选择要接管的能力。先选一个 MCP 服务或技能目录，再试搜确认。'),
+              h('button', { type: 'button', onClick: () => openScope() }, '选择要接管的能力')),
           h('div', { className: 'cg-toolbar' }, h('label', { className: 'cg-grow' }, '筛选能力', h('input', { type: 'search', value: query, onChange: e => setQuery(e.target.value), placeholder: '名称、说明或来源' })),
             h('label', null, '能力类型', h('select', { value: kind, onChange: e => setKind(e.target.value) }, h('option', { value: '' }, '全部类型'), h('option', { value: 'skill' }, 'Skills'), h('option', { value: 'mcp' }, 'MCP'))),
             h('label', null, '管理方式', h('select', { value: management, onChange: e => setManagement(e.target.value) }, h('option', { value: '' }, '全部方式'), h('option', { value: 'managed' }, '网关管理'), h('option', { value: 'native' }, '未由网关管理'))),
             inventoryFiltered && h('button', { type: 'button', onClick: () => { setQuery(''); setKind(''); setManagement('') } }, '清除筛选')),
-          h(Inventory, { inventory, query, kind, management })),
+          h(Inventory, { inventory, query, kind, management, onLogs: target => openLogs({ target }) })),
         (section === 'stats' || section === 'logs') && h(React.Fragment, null,
-          h('div', { className: 'cg-toolbar cg-scope' }, h('label', null, '记录范围', h('select', { value: historyScope, disabled: locked, onChange: e => { setHistoryScope(e.target.value); firstPage() } }, h('option', { value: 'all' }, '全部会话'), h('option', { value: 'selected' }, '所选活动会话'))),
+          h('div', { className: 'cg-toolbar cg-scope' }, h('label', null, '记录范围', h('select', { value: historyScope, disabled: locked, onChange: e => { setHistoryScope(e.target.value); firstPage(true) } }, h('option', { value: 'all' }, '全部会话'), h('option', { value: 'selected' }, '所选活动会话'))),
             h('span', { className: 'cg-chip cg-scope-meta' }, '最近 7 天')),
           !activity.storage.complete && h('p', { role: 'status', className: 'cg-notice cg-error' }, '记录样本不完整或持久化异常，统计只能代表当前可读取部分。', ` 损坏行 ${activity.storage.invalidLines}；写入失败次数 ${activity.storage.writeFailures ?? 0}；读取 ${activity.storage.readError ?? '正常'}；写入 ${activity.storage.writeError ?? '正常'}。`),
           section === 'stats' && stats.searchIncomplete > 0 && h('p', { role: 'status', className: 'cg-notice cg-error' }, `${stats.searchIncomplete} 次搜索的能力发现不完整，未计为未命中；当前未命中率不能代表完整检索质量。`),
@@ -399,15 +556,16 @@ window.__ModuleLoader__.load({
           h('section', { className: 'cg-workbench cg-panel', 'aria-label': '调用记录' },
             h('div', { className: 'cg-list-heading' }, h('h3', null, '调用记录'), h('span', null, '最新在前')),
             h('div', { className: 'cg-toolbar cg-filters' },
-              h('label', null, '结果', h('select', { value: outcome, disabled: locked, onChange: e => { setOutcome(e.target.value); firstPage() } }, h('option', { value: '' }, '全部结果'), ['success', 'error', 'cancelled'].map(value => h('option', { key: value, value }, label(value))))),
-              h('label', null, '操作', h('select', { value: action, disabled: locked, onChange: e => { setAction(e.target.value); firstPage() } }, h('option', { value: '' }, '全部操作'), ['search', 'load', 'describe', 'call'].map(value => h('option', { key: value, value }, label(value))))),
-              (outcome || action) && h('button', { type: 'button', disabled: locked, onClick: () => { setOutcome(''); setAction(''); firstPage() } }, '清除筛选')),
+              h('label', null, '结果', h('select', { value: outcome, disabled: locked, onChange: e => { setOutcome(e.target.value); firstPage(true) } }, h('option', { value: '' }, '全部结果'), ['success', 'error', 'cancelled'].map(value => h('option', { key: value, value }, label(value))))),
+              h('label', null, '操作', h('select', { value: action, disabled: locked, onChange: e => { setAction(e.target.value); firstPage(true) } }, h('option', { value: '' }, '全部操作'), ['search', 'load', 'describe', 'call'].map(value => h('option', { key: value, value }, label(value))))),
+              target && h('span', { className: 'cg-chip' }, `能力：${target.name}`),
+              (outcome || action || target) && h('button', { type: 'button', disabled: locked, onClick: () => { setOutcome(''); setAction(''); setTarget(null); firstPage(true) } }, '清除筛选')),
             h('p', { className: 'cg-footnote' }, '按结果或操作筛选记录。刷新查看最新记录。'),
             h('div', { className: 'cg-record-list' },
-              h(Records, { events: activity.events, onReview: review, saving: locked ? '*' : saving, filtered: Boolean(outcome || action) })),
+              h(Records, { events: activity.events, onReview: review, onDiagnostics: openDiagnostics, onInventory: name => { setQuery(name); setKind(''); setManagement(''); setSection('inventory') }, saving: locked ? '*' : saving, filtered: Boolean(outcome || action || target) })),
             h(Pagination, { title: '调用记录', total: activity.total, offset, limit, busy: locked || Boolean(error),
-              onPage: next => setPageRequest({ offset: next, limit, ...(activity.anchorId ? { anchorId: activity.anchorId } : {}) }),
-              onSize: size => setPageRequest({ offset: 0, limit: size }) }),
+              onPage: next => setPageRequest({ offset: next, limit, activityOnly: true, ...(activity.anchorId ? { anchorId: activity.anchorId } : {}) }),
+              onSize: size => setPageRequest({ offset: 0, limit: size, activityOnly: true }) }),
             h('details', { className: 'cg-disclosure' }, h('summary', null, '日志位置与保存内容'),
               h('p', null, '日志只保存调用元数据，包括操作、结果、耗时和错误类别。'),
               h('code', null, activity.storage.directory))))))
@@ -423,6 +581,8 @@ window.__ModuleLoader__.load({
       limit: z.number().int().min(1).max(500).optional(),
       offset: z.number().int().min(0).max(10000).optional(),
       anchorId: z.string().min(1).max(200).optional(),
+      target: z.strictObject({ kind: z.enum(['skill', 'mcp', 'server']), name: z.string().regex(/^[A-Za-z0-9_.:/@-]{1,220}$/) }).optional(),
+      includeInventory: z.boolean().optional(),
     })
     const reviewOptions = () => z.strictObject({ eventId: z.string().min(1), verdict: z.enum(['correct', 'wrong', 'unreviewed']) })
     const reportOptions = () => z.strictObject({ format: z.enum(['markdown', 'json']).optional(),
@@ -430,9 +590,12 @@ window.__ModuleLoader__.load({
     const configureOptions = () => z.strictObject({ revision: z.string().min(1).max(100),
       skillRoots: z.array(z.string().trim().min(1).max(4096)).max(200),
       mcpServers: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,32}$/)).max(500) })
+    const aliasOptions = () => z.strictObject({ revision: z.string().min(1).max(100),
+      kind: z.enum(['skill', 'mcp']), name: z.string().min(1).max(80),
+      word: z.string().trim().min(1).max(160).refine(word => Array.from(word).length <= 80, 'Alias must contain at most 80 Unicode characters') })
     const probeOptions = () => z.strictObject({ query: z.string().trim().min(1).max(1000),
       kind: z.enum(['skill', 'mcp']).optional(), agentId: z.string().min(1).max(200).optional() })
-    const methodOptions = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions, configure: configureOptions, probe: probeOptions }
+    const methodOptions = { snapshot: snapshotOptions, review: reviewOptions, report: reportOptions, configure: configureOptions, addAlias: aliasOptions, probe: probeOptions }
     const descriptors = Object.keys(methodOptions).map(method => {
       const codec = { mode: 'strict', typeSymbol: `${PACKAGE}#${method}Options`, create: methodOptions[method] }
       return {

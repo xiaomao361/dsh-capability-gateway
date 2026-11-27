@@ -33,6 +33,12 @@ test('client exports the package module and matching native Remote descriptors',
     assert.deepEqual(z.toJSONSchema(client.descriptors[index].parameters[0].codec.create()), z.toJSONSchema(descriptors[index].parameters[0].codec.create()))
     assert.deepEqual(z.toJSONSchema(client.descriptors[index].result.create()), z.toJSONSchema(descriptors[index].result.create()))
   }
+  for (const list of [client.descriptors, descriptors]) {
+    const schema = list.find(row => row.method === 'addAlias').parameters[0].codec.create()
+    const options = { revision: 'fixture', kind: 'skill', name: 'workflow' }
+    assert.equal(schema.safeParse({ ...options, word: '🚀'.repeat(80) }).success, true)
+    assert.equal(schema.safeParse({ ...options, word: '🚀'.repeat(81) }).success, false)
+  }
 })
 
 test('native settings panel renders expandable inventory lists and escaped descriptions', () => {
@@ -417,5 +423,103 @@ test('configuration keeps the draft across views and statistics opens filtered r
   assert.equal(byText(renderer, '运行日志').props['aria-pressed'], true)
   assert.equal(requests.at(-1).action, 'search')
   assert.equal(requests.at(-1).offset, 0)
+  await act(async () => renderer.unmount())
+})
+
+test('search lab saves a confirmed skill alias and probes the original query again', async () => {
+  let renderer
+  const calls = []
+  const api = {
+    probe: async options => {
+      calls.push(options)
+      return calls.length === 1 ? { state: 'not_found', results: [] } : {
+        state: 'matched', matchCount: 1, results: [{ kind: 'skill', name: 'workflow', reason: 'alias', score: 12 }],
+      }
+    },
+    addAlias: async options => { calls.push(options) },
+  }
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(client.SearchLab, {
+      api, agentId: fixture.inventory.agentId, inventory: fixture.inventory, management: scopeFixture,
+      onSaved: async () => fixture,
+    }))
+  })
+  await act(async () => renderer.root.findByProps({ maxLength: 1000 }).props.onChange({ target: { value: '试用别名' } }))
+  const submit = index => renderer.root.findAllByType('form')[index].props.onSubmit({ preventDefault() {} })
+  await act(async () => submit(0))
+  await act(async () => renderer.root.findAllByType('select')[1].props.onChange({ target: { value: 'skill:workflow' } }))
+  await act(async () => submit(1))
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), { kind: 'skill', name: 'workflow', word: '试用别名', revision: scopeFixture.revision })
+  assert.equal(calls[2].query, calls[0].query)
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('别名匹配'))
+  await act(async () => renderer.unmount())
+})
+
+test('first-time setup offers scope selection and seeds a search from the refreshed inventory', async () => {
+  let renderer
+  const requests = []
+  let snapshot = {
+    ...fixture,
+    inventory: { ...fixture.inventory, mcp: [{ ...fixture.inventory.mcp[0], managed: false }], skills: [] },
+    management: { ...scopeFixture, skillRoots: [], mcpServers: [] },
+  }
+  const api = {
+    snapshot: async options => {
+      requests.push(options)
+      return options.includeInventory === false ? { activity: snapshot.activity, agents: snapshot.agents } : snapshot
+    },
+    configure: async () => {
+      snapshot = { ...fixture, management: { ...scopeFixture, mcpServers: ['bosun'], revision: 'after-save' } }
+      return { saved: true }
+    },
+  }
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
+  await switchView(renderer, '运行日志')
+  await act(async () => selectWithOption(renderer, 'error').props.onChange({ target: { value: 'error' } }))
+  assert.equal(requests.at(-1).includeInventory, false)
+  await switchView(renderer, '能力清单')
+  const button = name => renderer.root.findAllByType('button').find(row => row.children.join('') === name)
+  await act(async () => button('选择要接管的能力').props.onClick())
+  const server = renderer.root.findAllByType('label').find(row => row.findAllByType('code').some(code => code.children.join('') === 'bosun')).findByType('input')
+  await act(async () => server.props.onChange({ target: { checked: true } }))
+  await act(async () => renderer.root.findAllByType('form')[0].props.onSubmit({ preventDefault() {} }))
+  assert.equal(requests.at(-1).includeInventory, undefined)
+  assert.equal(renderer.root.findByProps({ maxLength: 1000 }).props.value, 'mcp__bosun__echo')
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('当前接管 1 个 MCP 服务'))
+  await act(async () => renderer.unmount())
+})
+
+test('log paging, filtering and review skip inventory rescan while explicit refresh fetches full snapshot', async () => {
+  let renderer
+  const requests = []
+  const events = Array.from({ length: 25 }, (_, index) => sampleEvent(24 - index))
+  const api = {
+    snapshot: async options => {
+      requests.push(options)
+      const activity = {
+        ...fixture.activity,
+        events: events.slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 10)),
+        total: events.length, offset: options.offset ?? 0, limit: options.limit ?? 10, anchorId: 'event-24',
+      }
+      if (options.includeInventory === false) return { activity, agents: fixture.agents, config: fixture.config }
+      return { ...fixture, activity }
+    },
+    review: async () => ({ eventId: 'event-24', verdict: 'correct' }),
+  }
+  await act(async () => { renderer = TestRenderer.create(React.createElement(client.GatewayPanel, { api })) })
+  assert.equal(requests[0].includeInventory, undefined)
+  await switchView(renderer, '运行日志')
+  await act(async () => namedButton(renderer, '调用记录下一页').props.onClick())
+  assert.equal(requests.at(-1).includeInventory, false)
+  assert.equal(requests.at(-1).offset, 10)
+  await act(async () => selectWithOption(renderer, 'error').props.onChange({ target: { value: 'error' } }))
+  assert.equal(requests.at(-1).includeInventory, false)
+  assert.equal(requests.at(-1).outcome, 'error')
+  await act(async () => renderer.root.findAllByType('select').find(node => node.props.value === 'unreviewed').props.onChange({ target: { value: 'correct' } }))
+  assert.equal(requests.at(-1).includeInventory, false)
+  await switchView(renderer, '能力清单')
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('mcp__bosun__echo'))
+  await act(async () => namedButton(renderer, '刷新快照').props.onClick())
+  assert.equal(requests.at(-1).includeInventory, undefined)
   await act(async () => renderer.unmount())
 })

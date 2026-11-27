@@ -31,3 +31,19 @@ test('unsupported or unresolved schemas block dispatch explicitly; 2019 and 2020
     validate('fixture', schema, { endpoint: 'fixture' })
   }
 })
+
+test('validator caches by schema reference and handles more than 32 distinct schemas via LRU', () => {
+  const validate = createArgumentValidator()
+  const schemas = Array.from({ length: 48 }, (_, index) => ({
+    type: 'object',
+    properties: { [`field_${index}`]: { type: 'integer' } },
+    required: [`field_${index}`],
+    additionalProperties: false,
+  }))
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < schemas.length; i++) {
+      validate(`tool_${i}`, schemas[i], { [`field_${i}`]: i })
+      assert.throws(() => validate(`tool_${i}`, schemas[i], { [`field_${i}`]: 'bad' }), /invalid_arguments:/)
+    }
+  }
+})

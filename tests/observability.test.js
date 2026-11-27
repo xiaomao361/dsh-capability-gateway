@@ -223,3 +223,17 @@ test('diagnostic error counts cover the selected window independently of list fi
   assert.deepEqual(result.errors, [{ name: 'invalid_arguments', count: 1 }, { name: 'not_found', count: 1 }])
   assert.equal(result.stats.operations, 2)
 })
+
+test('capability history filters targets and search candidates before pagination', async t => {
+  const { journal } = await setup(t)
+  const search = journal.record({ action: 'search', candidates: [{ kind: 'mcp', name: 'mcp__fixture__list' }], outcome: 'success' })
+  const call = journal.record({ action: 'call', kind: 'mcp', target: 'mcp__fixture__list', outcome: 'error', errorCode: 'invalid_arguments' })
+  journal.record({ action: 'call', kind: 'mcp', target: 'mcp__fixture_extra__list', outcome: 'success' })
+  const target = { kind: 'server', name: 'fixture' }
+  const first = await journal.snapshot({ target, limit: 1 })
+  assert.equal(first.total, 2)
+  assert.equal(first.stats.calls, 2)
+  assert.equal(first.events[0].id, call)
+  const second = await journal.snapshot({ target, limit: 1, offset: 1, anchorId: first.anchorId })
+  assert.equal(second.events[0].id, search)
+})

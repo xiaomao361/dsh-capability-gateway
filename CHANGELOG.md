@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 — 2026-11-27
+
+- Guide first-time setup from the capability inventory to scope selection. After saving, refresh the inventory and prefill a search with a newly observed managed capability when one is available.
+- Let users add a local alias from an unmatched search trial and retry the query. Skill aliases apply to the selected skill. MCP aliases apply to a managed service with a discovery tool. Saves use the host configuration editor and reject stale revisions.
+- Open filtered runtime records from a skill, MCP service or MCP tool in the inventory. Add diagnostics and links back to the relevant settings. Log filtering, paging and review refresh activity without rescanning the inventory.
+- Share concurrent skill scans, bound file-reading concurrency, and debounce filesystem invalidation. Reuse term matches during ranking and compiled schemas during argument validation. Aggregate journal statistics in one pass with the existing metric definitions.
+
 ## 0.6.1 — 2026-11-09
 
 - Allow DSH 0.2 releases and prereleases starting at `0.2.1-rc.5`. Select the host API at runtime and preserve the caller's step admission and guards on scoped executors.

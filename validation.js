@@ -7,19 +7,29 @@ export function createArgumentValidator() {
   // Never coerce, insert defaults, remove arguments or fetch remote references.
   const options = { allErrors: true, strict: false, strictSchema: true, ownProperties: true, addUsedSchema: false, logger: false }
   const engines = [Ajv, Ajv2019, Ajv2020].map(Engine => addFormats(new Engine(options)))
-  const cache = new Map()
+  const byRef = new WeakMap()
+  const byJson = new Map()
+  const MAX_CACHE = 128
   return (name, schema, args) => {
     let validate
     try {
-      const key = JSON.stringify(schema)
-      validate = cache.get(key)
+      const isObject = schema !== null && typeof schema === 'object'
+      validate = isObject ? byRef.get(schema) : undefined
       if (!validate) {
-        const draft = schema?.$schema ?? ''
-        const engine = engines[/2020-12/.test(draft) ? 2 : /2019-09/.test(draft) ? 1 : 0]
-        validate = engine.compile(schema)
-        if (validate.$async) throw new Error('async schema validation is unsupported')
-        if (cache.size >= 32) cache.delete(cache.keys().next().value)
-        cache.set(key, validate)
+        const key = JSON.stringify(schema)
+        validate = byJson.get(key)
+        if (validate) {
+          byJson.delete(key)
+          byJson.set(key, validate)
+        } else {
+          const draft = schema?.$schema ?? ''
+          const engine = engines[/2020-12/.test(draft) ? 2 : /2019-09/.test(draft) ? 1 : 0]
+          validate = engine.compile(schema)
+          if (validate.$async) throw new Error('async schema validation is unsupported')
+          if (byJson.size >= MAX_CACHE) byJson.delete(byJson.keys().next().value)
+          byJson.set(key, validate)
+        }
+        if (isObject) byRef.set(schema, validate)
       }
     } catch {
       throw new Error(`unavailable: cannot validate the current schema for ${name}; no call was dispatched. Use action=describe to inspect the schema.`)
